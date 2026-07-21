@@ -38,10 +38,17 @@ RUN python3 -m pip install --upgrade pip \
 # `--no-build-isolation` is required: flash-attn's setup.py imports torch
 # directly, and pip's default isolated build venv doesn't have it (that's
 # what broke the plain `pip install -r requirements.txt` attempt before
-# this one). `ninja` + capped MAX_JOBS keep the compile from OOMing the
-# runner; TORCH_CUDA_ARCH_LIST is pinned to A100/H100 (this project's only
-# target GPUs) instead of building every architecture. Expect ~20-40min.
-RUN pip install ninja
+# this one). The trade-off: disabling build isolation also disables pip's
+# automatic install of the package's declared build-time deps (normally
+# pulled into that isolated venv from pyproject.toml's build-system.requires)
+# -- so packaging/setuptools/wheel/psutil (all imported by flash-attn's
+# setup.py) must already be in the main env, or metadata generation fails
+# with a plain ModuleNotFoundError before compilation even starts (as it did
+# here for `packaging`). ninja + capped MAX_JOBS keep the actual compile from
+# OOMing the runner; TORCH_CUDA_ARCH_LIST is pinned to A100/H100 (this
+# project's only target GPUs) instead of building every architecture.
+# Expect ~20-40min for the compile itself.
+RUN pip install ninja packaging setuptools wheel psutil
 ENV MAX_JOBS=2 \
     TORCH_CUDA_ARCH_LIST="8.0;9.0"
 RUN pip install --no-build-isolation -r requirements.txt \
