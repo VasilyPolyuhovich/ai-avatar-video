@@ -27,23 +27,26 @@ RUN python3 -m pip install --upgrade pip \
     && pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 \
        --index-url https://download.pytorch.org/whl/cu124
 
-# Prebuilt flash-attn wheel, installed BEFORE `pip install -r requirements.txt`
-# (which also pins flash-attn==2.7.4.post1): pip sees the exact version
-# already satisfied and skips it, instead of trying to build it from source --
-# which fails here anyway, since flash-attn's setup.py needs torch importable
-# in its OWN build-isolation venv, not just the outer one (a 30-60min compile
-# with matching nvcc arch flags is the fallback if this build ever breaks).
-# Try the newer C++11-ABI build first (matches recent official PyTorch pip
-# wheels), fall back to the pre-C++11-ABI one. Verified by import at build
-# time; there's no GPU in CI so actual forward-pass execution stays
-# unverified until run on a real pod.
-RUN ( pip install "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiTRUE-cp310-cp310-linux_x86_64.whl" \
-      && python3 -c "import flash_attn; print('flash_attn', flash_attn.__version__, 'cxx11abiTRUE ok')" ) \
-    || ( pip install "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp310-cp310-linux_x86_64.whl" \
-      && python3 -c "import flash_attn; print('flash_attn', flash_attn.__version__, 'cxx11abiFALSE ok')" )
-
-RUN pip install -r requirements.txt \
-    && pip install -r requirements_avatar.txt
+# flash-attn from source, against the already-installed torch. Two prebuilt
+# GitHub-release wheels (cxx11abiTRUE and FALSE, matching the "cu12torch2.6"
+# tag) were tried first and BOTH failed identically at import time:
+#   undefined symbol: _ZN3c105ErrorC2ENS_14SourceLocationE...
+# (a c10::Error/std::string ABI mismatch) -- so this isn't the cxx11-ABI
+# flag the wheel names advertise, it's those release wheels not actually
+# matching torch==2.6.0+cu124 as resolved today. Building from source
+# against the real installed torch sidesteps the whole guessing game.
+# `--no-build-isolation` is required: flash-attn's setup.py imports torch
+# directly, and pip's default isolated build venv doesn't have it (that's
+# what broke the plain `pip install -r requirements.txt` attempt before
+# this one). `ninja` + capped MAX_JOBS keep the compile from OOMing the
+# runner; TORCH_CUDA_ARCH_LIST is pinned to A100/H100 (this project's only
+# target GPUs) instead of building every architecture. Expect ~20-40min.
+RUN pip install ninja
+ENV MAX_JOBS=2 \
+    TORCH_CUDA_ARCH_LIST="8.0;9.0"
+RUN pip install --no-build-isolation -r requirements.txt \
+    && pip install -r requirements_avatar.txt \
+    && python3 -c "import flash_attn; print('flash_attn', flash_attn.__version__, 'built from source ok')"
 
 RUN mkdir -p weights outputs
 
