@@ -51,9 +51,15 @@ RUN python3 -m pip install --upgrade pip \
 RUN pip install ninja packaging setuptools wheel psutil
 ENV MAX_JOBS=2 \
     TORCH_CUDA_ARCH_LIST="8.0;9.0"
+# requirements_avatar.txt has an upstream bug: `libsndfile1==0.0.1` is a pip
+# line for what is actually the system C library (already installed via apt
+# above, matching soundfile/librosa's actual runtime need) -- no such PyPI
+# package exists, so `pip install -r requirements_avatar.txt` fails outright.
+# Strip that one line rather than patch the vendored file.
 RUN pip install --no-build-isolation -r requirements.txt \
-    && pip install -r requirements_avatar.txt \
-    && python3 -c "import flash_attn; print('flash_attn', flash_attn.__version__, 'built from source ok')"
+    && grep -v '^libsndfile1==' requirements_avatar.txt > requirements_avatar.filtered.txt \
+    && pip install -r requirements_avatar.filtered.txt \
+    && python3 -c "import flash_attn; print('flash_attn', flash_attn.__version__, 'import ok')"
 
 RUN mkdir -p weights outputs
 
