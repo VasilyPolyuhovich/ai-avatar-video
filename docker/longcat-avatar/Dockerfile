@@ -25,19 +25,25 @@ RUN git clone https://github.com/meituan-longcat/LongCat-Video.git /opt/LongCat-
 WORKDIR /opt/LongCat-Video
 RUN python3 -m pip install --upgrade pip \
     && pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 \
-       --index-url https://download.pytorch.org/whl/cu124 \
-    && pip install -r requirements.txt \
-    && pip install -r requirements_avatar.txt
+       --index-url https://download.pytorch.org/whl/cu124
 
-# Prebuilt flash-attn wheel -- avoids a 30-60min from-source compile that
-# needs matching nvcc arch flags. Try the newer C++11-ABI build first
-# (matches recent official PyTorch pip wheels), fall back to the
-# pre-C++11-ABI one. Verified by import at build time; there's no GPU in CI
-# so actual forward-pass execution stays unverified until run on a real pod.
+# Prebuilt flash-attn wheel, installed BEFORE `pip install -r requirements.txt`
+# (which also pins flash-attn==2.7.4.post1): pip sees the exact version
+# already satisfied and skips it, instead of trying to build it from source --
+# which fails here anyway, since flash-attn's setup.py needs torch importable
+# in its OWN build-isolation venv, not just the outer one (a 30-60min compile
+# with matching nvcc arch flags is the fallback if this build ever breaks).
+# Try the newer C++11-ABI build first (matches recent official PyTorch pip
+# wheels), fall back to the pre-C++11-ABI one. Verified by import at build
+# time; there's no GPU in CI so actual forward-pass execution stays
+# unverified until run on a real pod.
 RUN ( pip install "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiTRUE-cp310-cp310-linux_x86_64.whl" \
       && python3 -c "import flash_attn; print('flash_attn', flash_attn.__version__, 'cxx11abiTRUE ok')" ) \
     || ( pip install "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp310-cp310-linux_x86_64.whl" \
       && python3 -c "import flash_attn; print('flash_attn', flash_attn.__version__, 'cxx11abiFALSE ok')" )
+
+RUN pip install -r requirements.txt \
+    && pip install -r requirements_avatar.txt
 
 RUN mkdir -p weights outputs
 
