@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.DS_Store
+.env
+*.key
+.runpod-key
+outputs/
+*.mp4
+*.wav
+*.mp3
+.session/
