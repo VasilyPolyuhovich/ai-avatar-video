@@ -25,19 +25,44 @@ RUN git clone https://github.com/meituan-longcat/LongCat-Video.git /opt/LongCat-
 WORKDIR /opt/LongCat-Video
 RUN python3 -m pip install --upgrade pip \
     && pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 \
-       --index-url https://download.pytorch.org/whl/cu124 \
-    && pip install -r requirements.txt \
-    && pip install -r requirements_avatar.txt
+       --index-url https://download.pytorch.org/whl/cu124
 
-# Prebuilt flash-attn wheel -- avoids a 30-60min from-source compile that
-# needs matching nvcc arch flags. Try the newer C++11-ABI build first
-# (matches recent official PyTorch pip wheels), fall back to the
-# pre-C++11-ABI one. Verified by import at build time; there's no GPU in CI
-# so actual forward-pass execution stays unverified until run on a real pod.
-RUN ( pip install "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiTRUE-cp310-cp310-linux_x86_64.whl" \
-      && python3 -c "import flash_attn; print('flash_attn', flash_attn.__version__, 'cxx11abiTRUE ok')" ) \
-    || ( pip install "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp310-cp310-linux_x86_64.whl" \
-      && python3 -c "import flash_attn; print('flash_attn', flash_attn.__version__, 'cxx11abiFALSE ok')" )
+# flash-attn from source, against the already-installed torch. Two prebuilt
+# GitHub-release wheels (cxx11abiTRUE and FALSE, matching the "cu12torch2.6"
+# tag) were tried first and BOTH failed identically at import time:
+#   undefined symbol: _ZN3c105ErrorC2ENS_14SourceLocationE...
+# (a c10::Error/std::string ABI mismatch) -- so this isn't the cxx11-ABI
+# flag the wheel names advertise, it's those release wheels not actually
+# matching torch==2.6.0+cu124 as resolved today. Building from source
+# against the real installed torch sidesteps the whole guessing game.
+# `--no-build-isolation` is required: flash-attn's setup.py imports torch
+# directly, and pip's default isolated build venv doesn't have it (that's
+# what broke the plain `pip install -r requirements.txt` attempt before
+# this one). The trade-off: disabling build isolation also disables pip's
+# automatic install of the package's declared build-time deps (normally
+# pulled into that isolated venv from pyproject.toml's build-system.requires)
+# -- so packaging/setuptools/wheel/psutil (all imported by flash-attn's
+# setup.py) must already be in the main env, or metadata generation fails
+# with a plain ModuleNotFoundError before compilation even starts (as it did
+# here for `packaging`). ninja + capped MAX_JOBS keep the actual compile from
+# OOMing the runner; TORCH_CUDA_ARCH_LIST is pinned to A100/H100 (this
+# project's only target GPUs) instead of building every architecture.
+# Expect ~20-40min for the compile itself.
+RUN pip install ninja packaging setuptools wheel psutil
+ENV MAX_JOBS=2 \
+    TORCH_CUDA_ARCH_LIST="8.0;9.0"
+# requirements_avatar.txt has two upstream bugs, both verified against the
+# PyPI JSON API (every other line in both requirement files resolves):
+#   - `libsndfile1==0.0.1` -- the system C library, already installed via
+#     apt above (soundfile/librosa need the .so, not a pip package for it).
+#   - `tritonserverclient==0.0.6` -- no such package on PyPI at all (likely
+#     a typo for `tritonclient`); it's a client for a remote Triton
+#     Inference Server, irrelevant to running run_demo_avatar_*.py locally.
+# Strip both rather than patch the vendored file.
+RUN pip install --no-build-isolation -r requirements.txt \
+    && grep -vE '^(libsndfile1|tritonserverclient)==' requirements_avatar.txt > requirements_avatar.filtered.txt \
+    && pip install -r requirements_avatar.filtered.txt \
+    && python3 -c "import flash_attn; print('flash_attn', flash_attn.__version__, 'import ok')"
 
 RUN mkdir -p weights outputs
 
