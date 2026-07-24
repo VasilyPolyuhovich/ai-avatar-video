@@ -21,10 +21,16 @@ confirmed Ukrainian support as of this check).
   the comparison protocol and decision rule.
 
 ## 3. Network volume
-Created 2026-07-21: id **`plk85ofiny`**, name `ai-avatar-video`, **150GB**,
-DC **EU-RO-1** (Secure). Sized for both stacks' weights (~50-70GB InfiniteTalk
-+ ~30-40GB LongCat) plus outputs/cache headroom. A network volume is DC-locked
-— any pod deploy that attaches it must pin `dataCenterId: EU-RO-1`.
+Created 2026-07-24: id **`wrqr1689to`**, name `ai-avatar-video`, **150GB**,
+DC **EU-RO-1** (Secure), on the account this project now uses by default
+(`~/.runpod-key-video` — see `infra-notes.md`). Sized for both stacks'
+weights (~50-70GB InfiniteTalk + ~30-40GB LongCat) plus outputs/cache
+headroom. A network volume is DC-locked — any pod deploy that attaches it
+must pin `dataCenterId: EU-RO-1`.
+
+(An earlier volume, `plk85ofiny`, was created 2026-07-21 on a different
+account and no longer exists — 404 from the API when checked 2026-07-24,
+cause unknown. Nothing was ever downloaded onto it.)
 
 ## 4. Output format (unchanged from brief)
 Square MP4/H.264, ≤60s, diameter 384-640px; thumbnail JPEG ≤200KB/≤320px.

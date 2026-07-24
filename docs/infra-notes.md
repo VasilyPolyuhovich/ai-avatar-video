@@ -3,12 +3,38 @@
 Full detail lives in the skill (`~/.claude/skills/runpod-pod-ops/`); this file
 only records the choices specific to this project.
 
+## Two RunPod accounts
+
+This project now has two RunPod accounts available, kept side by side (no
+"switching" a single credential file back and forth):
+
+| | Account key file | SSH key | Network volume |
+|---|---|---|---|
+| **Active (default)** | `~/.runpod-key-video` | `~/.runpod/ssh/runpodctl-video-ssh-key[.pub]` | `wrqr1689to`, 150GB, EU-RO-1 |
+| Original | `~/.runpod-key` | `~/.runpod/ssh/runpodctl-ssh-key[.pub]` | none (`plk85ofiny` 404'd, deleted at some point — cause unknown, nothing was stored on it) |
+
+`scripts/pod_up.py` and `scripts/check_balance.sh` default to the active
+account. To target the original account instead, override **both**
+`ACCOUNT_KEY_FILE` and `SSH_PUBKEY_FILE` together (they must point at the
+same account's key pair, or the deployed pod will authorize a key that
+doesn't match whichever account you actually billed):
+```bash
+ACCOUNT_KEY_FILE=~/.runpod-key SSH_PUBKEY_FILE=~/.runpod/ssh/runpodctl-ssh-key.pub \
+  python3 scripts/pod_up.py --dry-run
+```
+Both SSH keys are RSA (RunPod's proxy only accepts legacy ssh-rsa). Neither
+needs registering in the RunPod console's "SSH Public Keys" for this
+project's own images — `pod_up.py` passes the pubkey directly as the pod's
+`PUBLIC_KEY` env, and each image's `entrypoint.sh` authorizes it itself.
+Console registration only matters if you also want RunPod's own
+templates/web-terminal to accept the same key.
+
 ## Persistence — why the Docker-image approach was chosen here
 
 | Layer | Survives Stop→Start | Survives Delete |
 |---|---|---|
 | container root `/` | ❌ | ❌ |
-| network volume `/workspace` (`plk85ofiny`) | ✅ | ✅ |
+| network volume `/workspace` (`wrqr1689to`) | ✅ | ✅ |
 
 Both `docker/infinitetalk` and `docker/longcat-avatar` bake the **app** (ComfyUI
 + nodes, or the LongCat repo + deps) into the image, and mount only
@@ -42,11 +68,12 @@ on the pod.
   run_demo_avatar_*.py` via SSH/`docker exec`). SSH on 22 only.
 - Both images run `sshd` and accept `$PUBLIC_KEY` (the pod's env var) into
   `/root/.ssh/authorized_keys` — `pod_up.py` populates it from
-  `~/.runpod/ssh/runpodctl-ssh-key.pub`.
+  `~/.runpod/ssh/runpodctl-video-ssh-key.pub` (the active account's key; see
+  "Two RunPod accounts" above).
 
 ## SSH recipe (once a pod exists)
 ```bash
-ssh -tt -i ~/.runpod/ssh/runpodctl-ssh-key \
+ssh -tt -i ~/.runpod/ssh/runpodctl-video-ssh-key \
   -o PubkeyAcceptedAlgorithms=+ssh-rsa \
   -o StrictHostKeyChecking=no \
   <POD_ID>-<SUFFIX>@ssh.runpod.io
