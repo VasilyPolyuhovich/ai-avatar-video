@@ -13,6 +13,20 @@ container init ("error creating device nodes"), leaving uptime at 0. On that
 failure it terminates the pod, blocklists the machineId, and falls through to
 the next host/candidate.
 
+CAUTION: uptime staying at 0 has more than one cause, and this script can't
+tell them apart by itself. A whole afternoon (2026-07-24) was spent chasing
+"broken hosts" across three regions (EU-RO-1 -> EUR-IS-1 -> US-MD-1) -- every
+single one of ~9 deploys actually failed the same way: RunPod's own pod-init
+emails said `IMAGE_AUTH_ERROR: unauthorized`, because the GHCR packages
+(ai-avatar-infinitetalk/-longcat) default to **private** visibility even
+though the repo pushing them has `packages: write` -- GitHub's Actions token
+can publish a package but can't flip its visibility, that's web-UI-only.
+REGISTRY_AUTH_ID now defaults to a saved RunPod registry credential
+(`saveRegistryAuth`, GHCR username must be lowercase) so this doesn't
+silently recur. If uptime ever sits at 0 again, check the RunPod console's
+pod-init error/email FIRST -- it names the real reason -- before assuming
+host flakiness and burning time hopping regions.
+
 Secrets: no app secret is required here (ComfyUI/LongCat have no built-in API
 key). The RunPod account key is read from $ACCOUNT_KEY_FILE (default
 ~/.runpod-key-video) and never printed. The SSH public key is read from
@@ -24,7 +38,7 @@ Two RunPod accounts exist for this project (see docs/infra-notes.md): the
 original account (`~/.runpod-key` / `~/.runpod/ssh/runpodctl-ssh-key.pub`,
 its network volume `plk85ofiny` no longer exists -- 404, deleted) and the
 funded one this project now uses by default (`~/.runpod-key-video` /
-`~/.runpod/ssh/runpodctl-video-ssh-key.pub`, volume `njvmaowlqv`). Override
+`~/.runpod/ssh/runpodctl-video-ssh-key.pub`, volume `fl7pl7z0sz`). Override
 both ACCOUNT_KEY_FILE and SSH_PUBKEY_FILE together if you ever need to
 target the old account -- they must point at the same account's key pair.
 
@@ -39,7 +53,8 @@ Env knobs: IMAGE, MIN_VRAM (default 80), MAX_PRICE (default 2.50),
     GPU_MATCH (default "A100|H100" -- regex on the GPU type id; the LongCat
     image's flash-attn is only compiled for those two archs),
     CONTAINER_DISK_GB (default 60), PORTS (default "8188/http,22/tcp"),
-    POD_NAME, NETWORK_VOLUME_ID (default njvmaowlqv), REGISTRY_AUTH_ID,
+    POD_NAME, NETWORK_VOLUME_ID (default fl7pl7z0sz), REGISTRY_AUTH_ID
+    (default a saved GHCR credential -- see the CAUTION note above),
     ACCOUNT_KEY_FILE, SSH_PUBKEY_FILE, START_TIMEOUT (default 600s -- covers
     a cold image pull), MAX_TRIES_PER_GPU (default 2).
 """
@@ -242,8 +257,8 @@ def main():
         "pod_name": env("POD_NAME", "ai-avatar-video"),
         "container_disk": int(env("CONTAINER_DISK_GB") or "60"),
         "ports": env("PORTS", "8188/http,22/tcp"),
-        "registry_auth_id": env("REGISTRY_AUTH_ID", ""),
-        "network_volume_id": env("NETWORK_VOLUME_ID", "njvmaowlqv"),
+        "registry_auth_id": env("REGISTRY_AUTH_ID", "cmrzcm01x0079uy8y4v8536wo"),
+        "network_volume_id": env("NETWORK_VOLUME_ID", "fl7pl7z0sz"),
         "data_center_id": None,
     }
     if cfg["network_volume_id"]:
