@@ -10,7 +10,7 @@ This project now has two RunPod accounts available, kept side by side (no
 
 | | Account key file | SSH key | Network volume |
 |---|---|---|---|
-| **Active (default)** | `~/.runpod-key-video` | `~/.runpod/ssh/runpodctl-video-ssh-key[.pub]` | `njvmaowlqv`, 150GB, EUR-IS-1 |
+| **Active (default)** | `~/.runpod-key-video` | `~/.runpod/ssh/runpodctl-video-ssh-key[.pub]` | `fl7pl7z0sz`, 150GB, US-MD-1 |
 | Original | `~/.runpod-key` | `~/.runpod/ssh/runpodctl-ssh-key[.pub]` | none (`plk85ofiny` 404'd, deleted at some point — cause unknown, nothing was stored on it) |
 
 `scripts/pod_up.py` and `scripts/check_balance.sh` default to the active
@@ -34,7 +34,7 @@ templates/web-terminal to accept the same key.
 | Layer | Survives Stop→Start | Survives Delete |
 |---|---|---|
 | container root `/` | ❌ | ❌ |
-| network volume `/workspace` (`njvmaowlqv`) | ✅ | ✅ |
+| network volume `/workspace` (`fl7pl7z0sz`) | ✅ | ✅ |
 
 Both `docker/infinitetalk` and `docker/longcat-avatar` bake the **app** (ComfyUI
 + nodes, or the LongCat repo + deps) into the image, and mount only
@@ -97,8 +97,25 @@ panel each time, don't assume it's stable.
   **terminate + `pod_up.py` fresh deploy** (network volume reattaches to any
   host) over Stop→Resume.
 
-## Registry
-Images are public on GHCR (`ghcr.io/vasilypolyuhovich/ai-avatar-*`) once CI
-builds them — no registry auth needed to pull. If that changes, see the
-skill's `ssh-and-api.md` for `saveRegistryAuth` (lowercase owner name is
-mandatory, or the mutation silently leaves a broken record).
+## Registry — the images are PRIVATE, not public
+
+`ghcr.io/vasilypolyuhovich/ai-avatar-infinitetalk` and `-longcat` default to
+**private** visibility on GHCR — `docker/build-push-action`'s `GITHUB_TOKEN`
+can publish a package but cannot flip its visibility (GitHub only exposes
+that toggle in the package's own web settings, not via the REST API; a
+`PATCH /user/packages/container/{name}` attempt 404s). This caused a full
+afternoon of chasing phantom "broken hosts" (2026-07-24, see
+`decisions.md#3-network-volume`) before the real error surfaced: RunPod's
+pod-init failure emails say `IMAGE_AUTH_ERROR: unauthorized`, but the
+GraphQL API gives no hint of *why* a pod never started — uptime just sits
+at 0, identical to an actually-broken host. **If a deploy ever silently
+fails to start again, check the RunPod console/email for the real reason
+before assuming host flakiness.**
+
+Fixed via the skill's `saveRegistryAuth` mutation (lowercase owner name is
+mandatory, or the mutation silently leaves a broken record) — credential id
+`cmrzcm01x0079uy8y4v8536wo`, already the default `REGISTRY_AUTH_ID` in
+`pod_up.py`. No action needed for normal use. To make the packages public
+instead (removing the need for this credential entirely), it has to be done
+by hand: GitHub → the repo → Packages → each package → Package settings →
+Change visibility.
