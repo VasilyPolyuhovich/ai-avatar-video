@@ -28,13 +28,25 @@ fi
 # *within the repo* under <dir> (e.g. a repo file at
 # split_files/diffusion_models/x.safetensors lands at
 # <dir>/split_files/diffusion_models/x.safetensors) -- not flat, which is
-# what ComfyUI's model folders need. Download to a scratch dir and move just
-# the file out, so the result always lands as <destdir>/<basename>.
+# what ComfyUI's model folders need. Download into a scratch dir *inside
+# destdir itself* (same filesystem as the final location) so the flattening
+# step is a same-filesystem rename, not a cross-filesystem copy -- the first
+# real run of this script (2026-07-24) hung for 6+ minutes moving a 30GB
+# file from the container's local /tmp to the network volume: the copy
+# itself finished (byte-identical sizes on both sides) but the process never
+# returned, stuck past the point `kill -9` could reach cleanly. Skips the
+# download entirely if the destination file already exists (resumability
+# after exactly that kind of interruption).
 fetch_flat() {
   local repo="$1" file="$2" destdir="$3"
-  local tmp; tmp=$(mktemp -d)
+  local dest="$destdir/$(basename "$file")"
+  if [ -f "$dest" ]; then
+    echo "  already have $dest, skipping"
+    return
+  fi
+  local tmp; tmp=$(mktemp -d "$destdir/.dl-XXXXXX")
   "$HF_CLI" download "$repo" "$file" --local-dir "$tmp"
-  mv "$tmp/$file" "$destdir/$(basename "$file")"
+  mv "$tmp/$file" "$dest"
   rm -rf "$tmp"
 }
 
@@ -65,8 +77,12 @@ echo "== Chinese-wav2vec2-base audio encoder (feature extractor, not ASR --"
 echo "   works cross-lingual for InfiniteTalk's audio conditioning). The"
 echo "   workflow's DownloadAndLoadWav2VecModel node can also fetch this"
 echo "   itself on first run; pre-downloading here just avoids that wait. =="
-"$HF_CLI" download TencentGameMate/chinese-wav2vec2-base \
-  --local-dir "$MODELS/audio_encoders/chinese-wav2vec2-base"
+if [ -d "$MODELS/audio_encoders/chinese-wav2vec2-base" ] && [ -n "$(ls -A "$MODELS/audio_encoders/chinese-wav2vec2-base" 2>/dev/null)" ]; then
+  echo "  already have it, skipping"
+else
+  "$HF_CLI" download TencentGameMate/chinese-wav2vec2-base \
+    --local-dir "$MODELS/audio_encoders/chinese-wav2vec2-base"
+fi
 
 echo "Done. Total size:"
 du -sh "$MODELS"
