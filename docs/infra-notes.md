@@ -10,7 +10,7 @@ This project now has two RunPod accounts available, kept side by side (no
 
 | | Account key file | SSH key | Network volume |
 |---|---|---|---|
-| **Active (default)** | `~/.runpod-key-video` | `~/.runpod/ssh/runpodctl-video-ssh-key[.pub]` | `wrqr1689to`, 150GB, EU-RO-1 |
+| **Active (default)** | `~/.runpod-key-video` | `~/.runpod/ssh/runpodctl-video-ssh-key[.pub]` | `njvmaowlqv`, 150GB, EUR-IS-1 |
 | Original | `~/.runpod-key` | `~/.runpod/ssh/runpodctl-ssh-key[.pub]` | none (`plk85ofiny` 404'd, deleted at some point — cause unknown, nothing was stored on it) |
 
 `scripts/pod_up.py` and `scripts/check_balance.sh` default to the active
@@ -34,7 +34,7 @@ templates/web-terminal to accept the same key.
 | Layer | Survives Stop→Start | Survives Delete |
 |---|---|---|
 | container root `/` | ❌ | ❌ |
-| network volume `/workspace` (`wrqr1689to`) | ✅ | ✅ |
+| network volume `/workspace` (`njvmaowlqv`) | ✅ | ✅ |
 
 Both `docker/infinitetalk` and `docker/longcat-avatar` bake the **app** (ComfyUI
 + nodes, or the LongCat repo + deps) into the image, and mount only

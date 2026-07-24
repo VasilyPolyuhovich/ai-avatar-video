@@ -21,12 +21,18 @@ confirmed Ukrainian support as of this check).
   the comparison protocol and decision rule.
 
 ## 3. Network volume
-Created 2026-07-24: id **`wrqr1689to`**, name `ai-avatar-video`, **150GB**,
-DC **EU-RO-1** (Secure), on the account this project now uses by default
+Created 2026-07-24: id **`njvmaowlqv`**, name `ai-avatar-video`, **150GB**,
+DC **EUR-IS-1** (Secure), on the account this project now uses by default
 (`~/.runpod-key-video` — see `infra-notes.md`). Sized for both stacks'
 weights (~50-70GB InfiniteTalk + ~30-40GB LongCat) plus outputs/cache
 headroom. A network volume is DC-locked — any pod deploy that attaches it
-must pin `dataCenterId: EU-RO-1`.
+must pin `dataCenterId: EUR-IS-1`.
+
+(First created in EU-RO-1, moved same-day to EUR-IS-1: EU-RO-1 had **zero**
+A100/H100 Secure stock at deploy time — `lowestPrice(...).stockStatus` was
+`None` for every A100/H100 variant, confirmed by querying per-DC, not just
+the global figure a plain `gpuTypes` query shows. EUR-IS-1 had A100-SXM4-80GB
+at Low stock. Moving cost nothing since the volume was still empty.)
 
 (An earlier volume, `plk85ofiny`, was created 2026-07-21 on a different
 account and no longer exists — 404 from the API when checked 2026-07-24,
