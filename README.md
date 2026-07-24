@@ -9,7 +9,7 @@ their reasoning: [`docs/decisions.md`](docs/decisions.md).
 
 Everything in this repo was built **without renting a GPU pod**. What exists:
 
-- A **150GB network volume** on RunPod (`wrqr1689to`, EU-RO-1) — created, empty.
+- A **150GB network volume** on RunPod (`njvmaowlqv`, EUR-IS-1) — created, empty.
   Two RunPod accounts exist for this project; see
   [`docs/infra-notes.md`](docs/infra-notes.md#two-runpod-accounts) for which
   one is active by default and how to target the other.
