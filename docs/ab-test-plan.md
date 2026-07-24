@@ -19,6 +19,23 @@ seeing either one run on the actual target photo.
 4. Frame-interpolate (RIFE, doubled FPS) to remove flicker, export square
    MP4/H.264 ≤60s per the brief's output spec.
 
+### How each stack is actually invoked
+- **InfiniteTalk**: open ComfyUI (SSH tunnel to :8188), load the bundled
+  `infinitetalk_single_example.json` workflow (baked into the image at
+  `/opt/workflows`, symlinked into ComfyUI's own workflow browser). Repoint
+  the model dropdowns per the note at the end of
+  `scripts/download_weights_infinitetalk.sh` (the example defaults to a
+  lighter 480p fp8 model + a step-distill LoRA; swap in the 720p fp16
+  weights for the real comparison, keep the LoRA only for the fast 480p
+  first-look pass).
+- **LongCat**: SSH in, write an `input_json` (schema confirmed against
+  `meituan-longcat/LongCat-Video`'s `assets/avatar/single_example_1.json`):
+  ```json
+  {"prompt": "<gesture prompt>", "cond_image": "/path/to/photo.png",
+   "cond_audio": {"person1": "/path/to/audio.mp3"}}
+  ```
+  then `torchrun run_demo_avatar_single_audio_to_video.py --checkpoint_dir=/workspace/longcat-weights/LongCat-Video-Avatar-1.5 --stage_1=at2v --input_json=<path> --use_distill --model_type avatar-v1.5 --resolution 480P` (drop `--use_int8` unless VRAM is tight on the chosen GPU).
+
 ## Rubric (1-5 each, notes required for any score ≤3)
 | Criterion | What to look for |
 |---|---|

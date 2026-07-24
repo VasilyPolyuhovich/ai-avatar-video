@@ -1,11 +1,17 @@
-# ComfyUI + WanVideoWrapper + InfiniteTalk (Wan2.1-14B I2V backbone).
+# ComfyUI + InfiniteTalk (Wan2.1-14B I2V backbone).
 # Weights are NOT baked in -- mount the RunPod network volume at /workspace and
 # run scripts/download_weights_infinitetalk.sh once (see docs/infra-notes.md).
 #
 # Pinned (2026-07-21):
 #   ComfyUI                    v0.28.0
-#   ComfyUI-WanVideoWrapper    088128b224242e110d3906c6750e9a3a348a659b (2026-05-24)
 #   InfiniteTalk (comfyui br.) 7089f0a7c84d2cb20709599fb08444ab3bc837ce (2025-08-19)
+#
+# NOTE: the InfiniteTalk "comfyui" branch IS a fork of Kijai's
+# ComfyUI-WanVideoWrapper with InfiniteTalk support merged in (its own
+# README: "This project is based on ComfyUI-WanVideoWrapper") -- it is NOT
+# a small companion pack meant to sit alongside a separate WanVideoWrapper
+# install. An earlier version of this Dockerfile cloned both, which would
+# have registered the same ComfyUI node classes twice. Install only this one.
 FROM nvidia/cuda:12.9.1-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -29,15 +35,17 @@ RUN python3 -m pip install --upgrade pip \
     && pip install -r requirements.txt
 
 RUN mkdir -p custom_nodes \
-    && git clone https://github.com/kijai/ComfyUI-WanVideoWrapper.git custom_nodes/ComfyUI-WanVideoWrapper \
-    && cd custom_nodes/ComfyUI-WanVideoWrapper \
-    && git checkout 088128b224242e110d3906c6750e9a3a348a659b \
-    && pip install -r requirements.txt
-
-RUN git clone --branch comfyui https://github.com/MeiGen-AI/InfiniteTalk.git custom_nodes/InfiniteTalk \
+    && git clone --branch comfyui https://github.com/MeiGen-AI/InfiniteTalk.git custom_nodes/InfiniteTalk \
     && cd custom_nodes/InfiniteTalk \
     && git checkout 7089f0a7c84d2cb20709599fb08444ab3bc837ce \
     && pip install -r requirements.txt
+
+# Bundle the maintainers' own example workflow (single-speaker InfiniteTalk)
+# so the pod has a known-working node graph to load in ComfyUI immediately,
+# instead of hand-wiring nodes blind on rented GPU time.
+RUN mkdir -p /opt/workflows \
+    && curl -fsSL -o /opt/workflows/infinitetalk_single_example.json \
+       https://raw.githubusercontent.com/MeiGen-AI/InfiniteTalk/comfyui/example_workflows/wanvideo_infinitetalk_single_example.json
 
 # Triton has prebuilt manylinux wheels. SageAttention is intentionally NOT
 # compiled here -- it needs the target GPU's real arch (TORCH_CUDA_ARCH_LIST);

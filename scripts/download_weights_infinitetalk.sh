@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Run ON the pod, after the network volume is mounted at /workspace. Not run
-# yet -- no pod exists at the time this was written (prep phase). Written
-# from verified HF repo listings (checked 2026-07-21); not execution-tested.
+# yet -- no pod exists at the time this was written (prep phase). Filenames
+# and source repos cross-checked 2026-07-24 against the maintainers' own
+# example workflow (MeiGen-AI/InfiniteTalk, comfyui branch,
+# example_workflows/wanvideo_infinitetalk_single_example.json) and the HF
+# repo listings; not execution-tested.
 #
 # Needs `huggingface-cli` (pip install -U "huggingface_hub[cli]").
 set -euo pipefail
@@ -14,32 +17,61 @@ if ! command -v huggingface-cli >/dev/null 2>&1; then
   exit 1
 fi
 
+# `huggingface-cli download <repo> <file> --local-dir <dir>` preserves the
+# file's path *within the repo* under <dir> (e.g. a repo file at
+# split_files/diffusion_models/x.safetensors lands at
+# <dir>/split_files/diffusion_models/x.safetensors) -- not flat, which is
+# what ComfyUI's model folders need. Download to a scratch dir and move just
+# the file out, so the result always lands as <destdir>/<basename>.
+fetch_flat() {
+  local repo="$1" file="$2" destdir="$3"
+  local tmp; tmp=$(mktemp -d)
+  huggingface-cli download "$repo" "$file" --local-dir "$tmp"
+  mv "$tmp/$file" "$destdir/$(basename "$file")"
+  rm -rf "$tmp"
+}
+
 echo "== Wan2.1 I2V 14B 720p backbone (fp16, ~30.5GB) =="
-huggingface-cli download Comfy-Org/Wan_2.1_ComfyUI_repackaged \
+fetch_flat Comfy-Org/Wan_2.1_ComfyUI_repackaged \
   split_files/diffusion_models/wan2.1_i2v_720p_14B_fp16.safetensors \
-  --local-dir "$MODELS/diffusion_models"
+  "$MODELS/diffusion_models"
 
 echo "== UMT5-XXL text encoder (bf16, NOT scaled, ~11.4GB per brief) =="
-huggingface-cli download Kijai/WanVideo_comfy umt5-xxl-enc-bf16.safetensors \
-  --local-dir "$MODELS/text_encoders"
+fetch_flat Kijai/WanVideo_comfy umt5-xxl-enc-bf16.safetensors "$MODELS/text_encoders"
 
-echo "== CLIP vision (open-clip xlm-roberta ViT-H, fp16, ~1.26GB) =="
-huggingface-cli download Kijai/WanVideo_comfy \
-  open-clip-xlm-roberta-large-vit-huge-14_visual_fp16.safetensors \
-  --local-dir "$MODELS/clip_vision"
+echo "== CLIP vision (clip_vision_h, fp16, ~1.26GB -- the exact filename the"
+echo "   example workflow's CLIPVisionLoader expects) =="
+fetch_flat Comfy-Org/Wan_2.1_ComfyUI_repackaged \
+  split_files/clip_vision/clip_vision_h.safetensors "$MODELS/clip_vision"
 
-echo "== Wan2.1 VAE (bf16, ~254MB) =="
-huggingface-cli download Kijai/WanVideo_comfy Wan2_1_VAE_bf16.safetensors \
-  --local-dir "$MODELS/vae"
+echo "== Wan2.1 VAE (bf16, ~254MB -- the example workflow's default is the"
+echo "   fp32 variant; bf16 works too and is 1/2 the download) =="
+fetch_flat Kijai/WanVideo_comfy Wan2_1_VAE_bf16.safetensors "$MODELS/vae"
 
-echo "== InfiniteTalk audio-conditioning weights, single-speaker (~2.7GB) =="
-huggingface-cli download MeiGen-AI/InfiniteTalk comfyui/infinitetalk_single.safetensors \
-  --local-dir "$MODELS/diffusion_models"
+echo "== InfiniteTalk audio-conditioning weights, single-speaker, fp16"
+echo "   (~4.8GB -- matches the brief's Wan2_1-InfiniteTalk-Single_fp16 spec;"
+echo "   note the upstream filename has a typo, 'InfiniTetalk') =="
+fetch_flat Kijai/WanVideo_comfy \
+  InfiniteTalk/Wan2_1-InfiniTetalk-Single_fp16.safetensors "$MODELS/diffusion_models"
 
 echo "== Chinese-wav2vec2-base audio encoder (feature extractor, not ASR --"
-echo "   works cross-lingual for InfiniteTalk's audio conditioning) =="
+echo "   works cross-lingual for InfiniteTalk's audio conditioning). The"
+echo "   workflow's DownloadAndLoadWav2VecModel node can also fetch this"
+echo "   itself on first run; pre-downloading here just avoids that wait. =="
 huggingface-cli download TencentGameMate/chinese-wav2vec2-base \
   --local-dir "$MODELS/audio_encoders/chinese-wav2vec2-base"
 
 echo "Done. Total size:"
 du -sh "$MODELS"
+
+cat <<'NOTE'
+
+NOTE: the bundled example workflow (/opt/workflows/infinitetalk_single_example.json
+in the image) defaults to a lighter 480p fp8 model + a step-distill LoRA, for a
+fast demo. This project's brief wants max quality (720p fp16, no distill LoRA),
+so after loading the workflow in ComfyUI, repoint two dropdowns:
+  - WanVideoModelLoader -> wan2.1_i2v_720p_14B_fp16.safetensors
+  - WanVideoLoraSelect   -> None / bypass the node (optional: keep it if you
+                            want faster sampling and are OK trading a little
+                            quality for it -- worth an A/B of its own later)
+NOTE
