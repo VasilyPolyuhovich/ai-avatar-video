@@ -1,24 +1,31 @@
 #!/usr/bin/env bash
-# Run ON the pod, after the network volume is mounted at /workspace. Not run
-# yet -- no pod exists at the time this was written (prep phase). Filenames
+# Run ON the pod, after the network volume is mounted at /workspace. Filenames
 # and source repos cross-checked 2026-07-24 against the maintainers' own
 # example workflow (MeiGen-AI/InfiniteTalk, comfyui branch,
 # example_workflows/wanvideo_infinitetalk_single_example.json) and the HF
-# repo listings; not execution-tested.
+# repo listings.
 #
-# Needs `huggingface-cli` (pip install -U "huggingface_hub[cli]").
+# Needs the huggingface_hub CLI. `huggingface-cli` was renamed to `hf` in a
+# recent huggingface_hub release and the old name stopped working entirely
+# (not just deprecated -- it errors out) on the image as actually deployed
+# 2026-07-24, despite pod_up.py/the Dockerfile never pinning a version. Auto-
+# detect whichever is present rather than hardcoding one.
 set -euo pipefail
 MODELS=${1:-/workspace/models}
 mkdir -p "$MODELS/diffusion_models" "$MODELS/text_encoders" \
          "$MODELS/clip_vision" "$MODELS/vae" "$MODELS/audio_encoders"
 
-if ! command -v huggingface-cli >/dev/null 2>&1; then
-  echo "huggingface-cli not found -- pip install -U 'huggingface_hub[cli]'" >&2
+if command -v hf >/dev/null 2>&1; then
+  HF_CLI=hf
+elif command -v huggingface-cli >/dev/null 2>&1; then
+  HF_CLI=huggingface-cli
+else
+  echo "neither 'hf' nor 'huggingface-cli' found -- pip install -U 'huggingface_hub[cli]'" >&2
   exit 1
 fi
 
-# `huggingface-cli download <repo> <file> --local-dir <dir>` preserves the
-# file's path *within the repo* under <dir> (e.g. a repo file at
+# `<cli> download <repo> <file> --local-dir <dir>` preserves the file's path
+# *within the repo* under <dir> (e.g. a repo file at
 # split_files/diffusion_models/x.safetensors lands at
 # <dir>/split_files/diffusion_models/x.safetensors) -- not flat, which is
 # what ComfyUI's model folders need. Download to a scratch dir and move just
@@ -26,7 +33,7 @@ fi
 fetch_flat() {
   local repo="$1" file="$2" destdir="$3"
   local tmp; tmp=$(mktemp -d)
-  huggingface-cli download "$repo" "$file" --local-dir "$tmp"
+  "$HF_CLI" download "$repo" "$file" --local-dir "$tmp"
   mv "$tmp/$file" "$destdir/$(basename "$file")"
   rm -rf "$tmp"
 }
@@ -58,7 +65,7 @@ echo "== Chinese-wav2vec2-base audio encoder (feature extractor, not ASR --"
 echo "   works cross-lingual for InfiniteTalk's audio conditioning). The"
 echo "   workflow's DownloadAndLoadWav2VecModel node can also fetch this"
 echo "   itself on first run; pre-downloading here just avoids that wait. =="
-huggingface-cli download TencentGameMate/chinese-wav2vec2-base \
+"$HF_CLI" download TencentGameMate/chinese-wav2vec2-base \
   --local-dir "$MODELS/audio_encoders/chinese-wav2vec2-base"
 
 echo "Done. Total size:"
