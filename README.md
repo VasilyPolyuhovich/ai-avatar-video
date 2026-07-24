@@ -9,12 +9,18 @@ their reasoning: [`docs/decisions.md`](docs/decisions.md).
 
 Everything in this repo was built **without renting a GPU pod**. What exists:
 
-- A **150GB network volume** on RunPod (`plk85ofiny`, EU-RO-1) — created, empty.
-- Two **Docker images**, built by this repo's CI on every push to `docker/**`:
+- A **150GB network volume** on RunPod (`wrqr1689to`, EU-RO-1) — created, empty.
+  Two RunPod accounts exist for this project; see
+  [`docs/infra-notes.md`](docs/infra-notes.md#two-runpod-accounts) for which
+  one is active by default and how to target the other.
+- Two **Docker images**, built and verified working by this repo's CI on
+  every push to `docker/**`:
   - `ghcr.io/vasilypolyuhovich/ai-avatar-infinitetalk:latest` — ComfyUI +
     `ComfyUI-WanVideoWrapper` + InfiniteTalk (Wan2.1-14B I2V backbone).
   - `ghcr.io/vasilypolyuhovich/ai-avatar-longcat:latest` — LongCat-Video-Avatar-1.5,
-    standalone (no ComfyUI).
+    standalone (no ComfyUI). Its `flash-attn` build needed 6 CI iterations to
+    get right (see the Dockerfile's comments) — the image now builds cleanly
+    and `import flash_attn` is verified to succeed.
   - Both are commit-pinned (exact SHAs in each Dockerfile's header) so a pull
     later reproduces exactly what was tested, not whatever the upstream repos
     happen to contain by then.
@@ -57,13 +63,10 @@ IMAGE=ghcr.io/vasilypolyuhovich/ai-avatar-longcat:latest \
 # 4. Once SSH'd in (suffix from the RunPod Connect panel -- see docs/infra-notes.md):
 bash scripts/download_weights_infinitetalk.sh   # or download_weights_longcat.sh
 
-# 5. When done for the session
-python3 -c "
-import os,json,urllib.request
-k=open(os.path.expanduser('~/.runpod-key')).read().strip()
-# ... or just click Stop/Terminate in the console
-"
+# 5. When done for the session -- just Stop/Terminate in the console,
+#    or use scripts/check_balance.sh's account key to call podStop via the API
 ```
 
-Requires `~/.runpod-key` (account key) and `~/.runpod/ssh/runpodctl-ssh-key[.pub]`
-locally — see [`docs/infra-notes.md`](docs/infra-notes.md).
+Requires `~/.runpod-key-video` (account key) and
+`~/.runpod/ssh/runpodctl-video-ssh-key[.pub]` locally — see
+[`docs/infra-notes.md`](docs/infra-notes.md#two-runpod-accounts).

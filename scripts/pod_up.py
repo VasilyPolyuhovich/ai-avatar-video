@@ -15,9 +15,18 @@ the next host/candidate.
 
 Secrets: no app secret is required here (ComfyUI/LongCat have no built-in API
 key). The RunPod account key is read from $ACCOUNT_KEY_FILE (default
-~/.runpod-key) and never printed. The SSH public key is read from
-$SSH_PUBKEY_FILE (default ~/.runpod/ssh/runpodctl-ssh-key.pub) and passed as
-the pod's PUBLIC_KEY env so the images' entrypoint.sh can authorize it.
+~/.runpod-key-video) and never printed. The SSH public key is read from
+$SSH_PUBKEY_FILE (default ~/.runpod/ssh/runpodctl-video-ssh-key.pub) and
+passed as the pod's PUBLIC_KEY env so the images' entrypoint.sh can
+authorize it.
+
+Two RunPod accounts exist for this project (see docs/infra-notes.md): the
+original account (`~/.runpod-key` / `~/.runpod/ssh/runpodctl-ssh-key.pub`,
+its network volume `plk85ofiny` no longer exists -- 404, deleted) and the
+funded one this project now uses by default (`~/.runpod-key-video` /
+`~/.runpod/ssh/runpodctl-video-ssh-key.pub`, volume `wrqr1689to`). Override
+both ACCOUNT_KEY_FILE and SSH_PUBKEY_FILE together if you ever need to
+target the old account -- they must point at the same account's key pair.
 
 Usage:
     python3 scripts/pod_up.py                # deploy InfiniteTalk, print URL
@@ -28,7 +37,7 @@ Usage:
 
 Env knobs: IMAGE, MIN_VRAM (default 80), MAX_PRICE (default 2.50),
     CONTAINER_DISK_GB (default 60), PORTS (default "8188/http,22/tcp"),
-    POD_NAME, NETWORK_VOLUME_ID (default plk85ofiny), REGISTRY_AUTH_ID,
+    POD_NAME, NETWORK_VOLUME_ID (default wrqr1689to), REGISTRY_AUTH_ID,
     ACCOUNT_KEY_FILE, SSH_PUBKEY_FILE, START_TIMEOUT (default 600s -- covers
     a cold image pull), MAX_TRIES_PER_GPU (default 2).
 """
@@ -55,7 +64,7 @@ def read_file(path):
 
 
 def load_account_key():
-    path = env("ACCOUNT_KEY_FILE", "~/.runpod-key")
+    path = env("ACCOUNT_KEY_FILE", "~/.runpod-key-video")
     try:
         return read_file(path)
     except OSError as e:
@@ -63,7 +72,7 @@ def load_account_key():
 
 
 def load_public_key():
-    path = env("SSH_PUBKEY_FILE", "~/.runpod/ssh/runpodctl-ssh-key.pub")
+    path = env("SSH_PUBKEY_FILE", "~/.runpod/ssh/runpodctl-video-ssh-key.pub")
     try:
         return read_file(path)
     except OSError:
@@ -222,7 +231,7 @@ def main():
         "container_disk": int(env("CONTAINER_DISK_GB") or "60"),
         "ports": env("PORTS", "8188/http,22/tcp"),
         "registry_auth_id": env("REGISTRY_AUTH_ID", ""),
-        "network_volume_id": env("NETWORK_VOLUME_ID", "plk85ofiny"),
+        "network_volume_id": env("NETWORK_VOLUME_ID", "wrqr1689to"),
         "data_center_id": None,
     }
     if cfg["network_volume_id"]:
