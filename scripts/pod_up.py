@@ -36,6 +36,8 @@ Usage:
         PORTS=22/tcp python3 scripts/pod_up.py   # deploy the LongCat image instead
 
 Env knobs: IMAGE, MIN_VRAM (default 80), MAX_PRICE (default 2.50),
+    GPU_MATCH (default "A100|H100" -- regex on the GPU type id; the LongCat
+    image's flash-attn is only compiled for those two archs),
     CONTAINER_DISK_GB (default 60), PORTS (default "8188/http,22/tcp"),
     POD_NAME, NETWORK_VOLUME_ID (default wrqr1689to), REGISTRY_AUTH_ID,
     ACCOUNT_KEY_FILE, SSH_PUBKEY_FILE, START_TIMEOUT (default 600s -- covers
@@ -43,6 +45,7 @@ Env knobs: IMAGE, MIN_VRAM (default 80), MAX_PRICE (default 2.50),
 """
 import json
 import os
+import re
 import sys
 import time
 import urllib.request
@@ -96,7 +99,7 @@ def gql(account_key, query, variables=None):
         return json.loads(resp.read())
 
 
-def rank_gpus(account_key, min_vram, max_price):
+def rank_gpus(account_key, min_vram, max_price, gpu_match):
     q = """query{gpuTypes{id memoryInGb secureCloud securePrice
       lowestPrice(input:{gpuCount:1,secureCloud:true}){stockStatus uninterruptablePrice}}}"""
     data = gql(account_key, q)
@@ -109,6 +112,8 @@ def rank_gpus(account_key, min_vram, max_price):
         price = g.get("securePrice")
         stock = (g.get("lowestPrice") or {}).get("stockStatus")
         if not g.get("secureCloud") or vram < min_vram:
+            continue
+        if gpu_match and not re.search(gpu_match, g["id"], re.IGNORECASE):
             continue
         if stock not in STOCK_RANK:  # None/unknown => not buyable right now
             continue
@@ -211,13 +216,20 @@ def main():
     args = set(sys.argv[1:])
     min_vram = float(env("MIN_VRAM") or "80")
     max_price = float(env("MAX_PRICE") or "2.50")
+    # Restricted to A100/H100 by default: the LongCat image's flash-attn was
+    # compiled with TORCH_CUDA_ARCH_LIST="8.0;9.0" (those two families'
+    # compute capabilities) -- landing on other >=80GB hardware (e.g. an
+    # RTX PRO 6000 Blackwell) would have no matching kernel for it. Override
+    # GPU_MATCH="" to lift the restriction if that ever stops mattering.
+    gpu_match = env("GPU_MATCH", "A100|H100")
     account_key = load_account_key()
 
-    ranked = rank_gpus(account_key, min_vram, max_price)
+    ranked = rank_gpus(account_key, min_vram, max_price, gpu_match)
     if not ranked:
-        sys.exit(f"No in-stock Secure GPU with >={min_vram:g}GB VRAM under ${max_price:g}/hr right now.")
+        sys.exit(f"No in-stock Secure GPU with >={min_vram:g}GB VRAM under ${max_price:g}/hr "
+                  f"matching /{gpu_match}/ right now.")
 
-    print(f"Candidates (>= {min_vram:g}GB, Secure, in stock, <= ${max_price:g}/hr), best first:")
+    print(f"Candidates (>= {min_vram:g}GB, Secure, in stock, <= ${max_price:g}/hr, matching /{gpu_match}/), best first:")
     for g in ranked:
         print(f"  {g['id']:<42} {g['vram']:>4}G  ${g['price']:<6} stock={g['stock']}")
     if "--dry-run" in args:
