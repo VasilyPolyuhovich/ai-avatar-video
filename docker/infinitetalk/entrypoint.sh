@@ -13,6 +13,12 @@ ln -s "$WORKSPACE/models" /opt/ComfyUI/models
 ln -s "$WORKSPACE/output" /opt/ComfyUI/output
 ln -s "$WORKSPACE/input"  /opt/ComfyUI/input
 
+# Surface the bundled example workflow (baked into the image at
+# /opt/workflows, see the Dockerfile) in ComfyUI's own workflow browser.
+mkdir -p /opt/ComfyUI/user/default/workflows
+ln -sf /opt/workflows/infinitetalk_single_example.json \
+  /opt/ComfyUI/user/default/workflows/infinitetalk_single_example.json
+
 # SSH access via the RunPod proxy recipe (docs/infra-notes.md). PUBLIC_KEY is
 # populated by scripts/pod_up.py from the local runpodctl-ssh-key.pub.
 if [ -n "${PUBLIC_KEY:-}" ]; then
