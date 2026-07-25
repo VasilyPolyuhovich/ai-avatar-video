@@ -135,6 +135,36 @@ cause unknown. Nothing was ever downloaded onto it.)
 Square MP4/H.264, ≤60s, diameter 384-640px; thumbnail JPEG ≤200KB/≤320px.
 Telegram rounds client-side — no manual circular masking needed.
 
+## 5. Generation UI (decided 2026-07-25)
+
+Now that the pipeline shape is locked (`scripts/run_longcat_avatar.sh`),
+built a one-command generator on top of it: `scripts/generate_avatar_video.py`
+(CLI, importable) + `scripts/app_gradio.py` (minimal local UI). Full usage
+in [`generate-video.md`](generate-video.md). Two scoping decisions made via
+AskUserQuestion, both explicitly trading isolation/scale for simplicity
+given the current small, trusted user base:
+
+- **GPU lifecycle: on-demand per request, not a warm pool.** Deploy a fresh
+  pod, render, retrieve, terminate — every time. Slower per-request
+  (~10-16 min including pod boot) but nothing bills while idle, which won
+  out over keeping a pod warm during a work session given how much this
+  project has already been driven by cost sensitivity. The orchestrator's
+  hard requirement, given that tradeoff, is that it must **always**
+  terminate the pod, including on crash or Ctrl-C (see the script's own
+  docstring/`_safe_terminate` for how that's enforced).
+- **Colleague access: a shared RunPod account key**, not individual
+  accounts or a RunPod Team. Simpler onboarding (no per-person account
+  setup, no billing split) at the explicit cost of usage isolation —
+  anyone with the key can see and stop anyone else's pods, and everyone
+  bills to the same balance. Each person still generates their **own** SSH
+  keypair locally (no sharing needed there — deploy-time key authorization
+  already works per-deploy with zero code changes). If this stops being an
+  acceptable tradeoff (more people, less trust), revisit as a RunPod Team
+  or individual accounts before scaling further.
+- Both remain a **local CLI/UI tool per person**, not a hosted service —
+  the Telegram-bot/web-app phase (with real per-user auth, no shared-secret
+  distribution) is still deliberately future work, not started.
+
 ## Still open
 - Whether SageAttention gets built on top of the LongCat image (deferred to
   the actual pod — see `infra-notes.md`).
@@ -142,12 +172,15 @@ Telegram rounds client-side — no manual circular masking needed.
   against the HF API) into a real script, and consider running it as a
   standard last step of both download scripts rather than only on-demand
   after a failure.
-- Build a simple end-user UI in front of LongCat (upload photo + audio +
-  prompt, get back the Telegram video note) — the pipeline shape is now
-  locked in (`scripts/run_longcat_avatar.sh`), so this can start.
 - Get a real ElevenLabs Ukrainian voice-clone sample to replace the
   placeholder Russian `celyj.mp3` test clip.
 - Pod for the A/B was terminated 2026-07-25 after the winning render
-  (network volume `fl7pl7z0sz` persists with all weights intact) — next
-  session needs a fresh `pod_up.py` deploy against the `longcat-avatar`
-  image before any further rendering.
+  (network volume `fl7pl7z0sz` persists with all weights intact) —
+  `scripts/generate_avatar_video.py` deploys fresh pods on request now, no
+  manual `pod_up.py` step needed for normal generation.
+- A real paid end-to-end run of `generate_avatar_video.py` (plus a Ctrl-C
+  negative test proving the terminate-on-interrupt contract) is deliberately
+  deferred to a later session — only free checks (`--dry-run`, import smoke
+  tests) have been run so far.
+- Public/hosted colleague interface (Telegram bot or web app, with real
+  per-user auth) — future phase, not started.
