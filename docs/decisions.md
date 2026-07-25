@@ -144,14 +144,30 @@ in [`generate-video.md`](generate-video.md). Two scoping decisions made via
 AskUserQuestion, both explicitly trading isolation/scale for simplicity
 given the current small, trusted user base:
 
-- **GPU lifecycle: on-demand per request, not a warm pool.** Deploy a fresh
-  pod, render, retrieve, terminate — every time. Slower per-request
-  (~10-16 min including pod boot) but nothing bills while idle, which won
-  out over keeping a pod warm during a work session given how much this
-  project has already been driven by cost sensitivity. The orchestrator's
-  hard requirement, given that tradeoff, is that it must **always**
-  terminate the pod, including on crash or Ctrl-C (see the script's own
-  docstring/`_safe_terminate` for how that's enforced).
+- **GPU lifecycle: on-demand per request for the CLI; session-scoped reuse
+  for the Gradio UI (amended 2026-07-25).** The CLI (`generate_avatar_video()`)
+  keeps the original rule unchanged: deploy a fresh pod, render, retrieve,
+  terminate, every single call — nothing bills while idle, and it must
+  **always** terminate the pod, including on crash or Ctrl-C (see
+  `_safe_terminate`). The Gradio UI (`scripts/app_gradio.py`) **partially
+  reverses this** via a new `PodSession` class: it keeps one pod alive
+  across several "Generate" clicks, because a real session that day showed
+  the cost of the original rule in practice — every fresh pod repays a ~5
+  min one-time `torch.compile` kernel-compilation cost (cached only on that
+  pod's local disk), which is wasteful when generating several videos in a
+  row. `PodSession` still guarantees termination on: an explicit Stop
+  button, any render error (a crash can leave the GPU in a bad state —
+  this session hit a real `CUDA error: device(s) is/are busy or
+  unavailable` mid-render), an idle timeout (default 15 min,
+  `IDLE_TIMEOUT_S` override), and the local process exiting (`atexit` for
+  Ctrl-C/normal exit, explicit `SIGTERM`/`SIGHUP` handlers for the
+  terminal closing — plain `atexit` alone does *not* cover signal-based
+  termination). **Explicitly accepted, not solved**: `SIGKILL`, or the
+  machine crashing/sleeping for a long time, bypass all four triggers —
+  `scripts/check_balance.sh`/the RunPod console remain the backstop. See
+  `scripts/generate_avatar_video.py`'s `PodSession` docstring for the full
+  locking-safety contract (an earlier draft had two real self-deadlock
+  bugs, caught in review before implementation).
 - **Colleague access: a shared RunPod account key**, not individual
   accounts or a RunPod Team. Simpler onboarding (no per-person account
   setup, no billing split) at the explicit cost of usage isolation —
@@ -164,6 +180,31 @@ given the current small, trusted user base:
 - Both remain a **local CLI/UI tool per person**, not a hosted service —
   the Telegram-bot/web-app phase (with real per-user auth, no shared-secret
   distribution) is still deliberately future work, not started.
+
+### Prompt/guidance-scale limitation in distilled mode, and mitigations (2026-07-25)
+
+User-reported: generated videos have exaggerated articulation/mimicry, and
+the `--prompt` field seems to have no effect. Confirmed as expected
+behavior, not a bug: `run_demo_avatar_single_audio_to_video.py` (upstream)
+unconditionally overrides **both** `text_guidance_scale` and
+`audio_guidance_scale` to `1.0` whenever `--use_distill` is passed
+(regardless of any other flag) — and `scripts/run_longcat_avatar.sh` always
+passed `--use_distill` (the whole point of the A/B-winning config was the
+8-step distilled sampler's speed/cost). There is **no supported combination**
+of "fast distilled sampling" + "guidance scale actually matters" in the
+upstream script as written. Two mitigations added, both opt-in:
+- `--no-distill` (`run_longcat_avatar.sh`, threaded through
+  `generate_avatar_video.py`/`PodSession`/the Gradio UI's Advanced section):
+  disables the distilled LoRA entirely, restoring the full 50-step sampler
+  and the upstream defaults (`text_guidance_scale`/`audio_guidance_scale`
+  = 4.0) — the only real lever for prompt/guidance control. Costs roughly
+  6x the usual render time/cost; not the default.
+- `--audio-gain-db`: applies an `ffmpeg volume` filter to a **local** copy
+  of the driving audio before upload (original file untouched). Cheap,
+  free-of-GPU-cost lever based on the empirical observation that the
+  model's motion signal correlates with the driving audio's energy —
+  quieter/flatter audio tends to reduce exaggerated articulation without
+  needing `--no-distill` at all. Worth trying first.
 
 ## Still open
 - Whether SageAttention gets built on top of the LongCat image (deferred to
@@ -178,9 +219,15 @@ given the current small, trusted user base:
   (network volume `fl7pl7z0sz` persists with all weights intact) —
   `scripts/generate_avatar_video.py` deploys fresh pods on request now, no
   manual `pod_up.py` step needed for normal generation.
-- A real paid end-to-end run of `generate_avatar_video.py` (plus a Ctrl-C
-  negative test proving the terminate-on-interrupt contract) is deliberately
-  deferred to a later session — only free checks (`--dry-run`, import smoke
-  tests) have been run so far.
+- A real paid end-to-end run of `generate_avatar_video.py` happened
+  2026-07-25 (via the CLI) — hit a real `CUDA error: device(s) is/are busy
+  or unavailable` mid-render on one attempt, and confirmed the
+  `finally`-terminate contract held (pod correctly torn down, no orphaned
+  billing) even on that real failure. A deliberate Ctrl-C negative test,
+  and a real end-to-end exercise of the Gradio UI's `PodSession` (session
+  reuse across clicks, Stop button, idle-timeout firing, Ctrl-C/SIGTERM
+  handling), are still outstanding — only free checks (`--dry-run`, import
+  smoke tests, manual lock-invariant review) have been run against the
+  `PodSession` code so far.
 - Public/hosted colleague interface (Telegram bot or web app, with real
   per-user auth) — future phase, not started.
