@@ -32,10 +32,26 @@ Options:
   --resolution 480p|720p    Default: 480p
   --num-segments N          Default: auto-computed from audio duration.
   --output-dir PATH         Default: ./outputs_avatar_single
+  --no-distill              Disable the 8-step distilled LoRA -- runs the
+                             full 50-step sampler instead, which is the ONLY
+                             way text_guidance_scale/audio_guidance_scale
+                             (upstream defaults 4.0/4.0) actually matter.
+                             ~6x more inference steps per segment -> ~6x
+                             longer render and cost. See the note below.
 EOF
   exit 1
 }
 
+# NOTE on --no-distill: the upstream script (run_demo_avatar_single_audio_to_video.py)
+# unconditionally overrides BOTH text_guidance_scale and audio_guidance_scale
+# to 1.0 whenever --use_distill is passed, regardless of any other flag --
+# there is no supported combination of "fast 8-step distilled sampling" +
+# "guidance scale actually has an effect". Confirmed 2026-07-25 after a user
+# report that prompts seemed to do nothing and articulation looked
+# exaggerated in every render -- that's expected, not a bug, given
+# text_guidance_scale=1.0/audio_guidance_scale=1.0 in the default (distilled)
+# mode this script has always used. --no-distill is the only way to get that
+# control back; it costs roughly 6x the render time (50 steps vs 8).
 IMAGE=""
 AUDIO=""
 PROMPT="A person speaks calmly to the camera in a steady, natural tone, with a neutral, composed expression."
@@ -43,6 +59,7 @@ CHECKPOINT_DIR="/workspace/longcat-weights/LongCat-Video-Avatar-1.5"
 RESOLUTION="480p"
 NUM_SEGMENTS=""
 OUTPUT_DIR="./outputs_avatar_single"
+DISTILL_FLAG="--use_distill"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -53,10 +70,16 @@ while [[ $# -gt 0 ]]; do
     --resolution) RESOLUTION="$2"; shift 2 ;;
     --num-segments) NUM_SEGMENTS="$2"; shift 2 ;;
     --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
+    --no-distill) DISTILL_FLAG=""; shift ;;
     -h|--help) usage ;;
     *) echo "Unknown arg: $1" >&2; usage ;;
   esac
 done
+
+if [[ -z "$DISTILL_FLAG" ]]; then
+  echo "--no-distill: running the full 50-step sampler (text/audio guidance" >&2
+  echo "scale 4.0/4.0 apply) -- expect roughly 6x the usual render time." >&2
+fi
 
 [[ -n "$IMAGE" && -n "$AUDIO" ]] || usage
 [[ -f "$IMAGE" ]] || { echo "No such image: $IMAGE" >&2; exit 1; }
@@ -99,7 +122,7 @@ exec torchrun --nproc_per_node=1 run_demo_avatar_single_audio_to_video.py \
   --stage_1=ai2v \
   --num_segments="$NUM_SEGMENTS" \
   --input_json="$INPUT_JSON" \
-  --use_distill \
+  $DISTILL_FLAG \
   --model_type avatar-v1.5 \
   --resolution "$RESOLUTION" \
   --output_dir "$OUTPUT_DIR"

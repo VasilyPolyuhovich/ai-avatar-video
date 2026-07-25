@@ -109,6 +109,18 @@ Useful flags:
   spending anything.
 - `--json` — print the result as one JSON line instead of a summary
   sentence (useful for scripting).
+- `--no-distill` — disable the 8-step distilled sampler and run the full
+  50-step one instead. **This is the only way `--prompt` (and guidance
+  scale generally) actually affects the output** — the distilled mode this
+  tool uses by default forces both text and audio guidance to their
+  minimum regardless of what you ask for, which is also why articulation
+  can look exaggerated with the default settings. Costs roughly **6x** the
+  usual render time/cost.
+- `--audio-gain-db -6` (or similar) — apply a volume reduction to a local
+  copy of your audio before upload. Quieter, flatter delivery tends to
+  produce less exaggerated mouth articulation, since the model's motion
+  signal correlates with the driving audio's energy. Free to try (no extra
+  GPU time), worth experimenting with before reaching for `--no-distill`.
 
 ### Option 2: local web UI (Gradio)
 
@@ -119,17 +131,45 @@ python3 scripts/app_gradio.py
 
 Open `http://127.0.0.1:7860` in your browser. Upload a photo and an audio
 clip, optionally type a prompt, choose a resolution, click **Generate**.
-The status box streams the same live progress as the CLI; the finished
-video appears in the player when done. This only runs on your own machine —
-nobody else can reach it.
+An **Advanced** section has the same `--no-distill`/audio-gain controls as
+the CLI. This only runs on your own machine — nobody else can reach it.
+
+**Unlike the CLI, the UI keeps one pod alive across a session** instead of
+redeploying for every click — the first Generate pays the usual ~10-16 min
+(pod boot + the one-time ~5 min `torch.compile` warmup), later clicks in
+the same session skip both and just render (typically a few minutes). The
+pod is destroyed automatically on any of:
+- Clicking **Stop pod**.
+- Any render error (a crash can leave the GPU in a bad state, so the next
+  attempt gets a clean pod rather than reusing a possibly-broken one).
+- Sitting idle for **15 minutes** by default (override with
+  `IDLE_TIMEOUT_S=1800 python3 scripts/app_gradio.py` for 30 min, etc.) —
+  the safety net for leaving the browser tab open without clicking Stop;
+  closing the *tab* does **not** stop the pod by itself, since the local
+  `app_gradio.py` process keeps running in the background regardless.
+- Ctrl-C, or closing the terminal running `app_gradio.py` (best effort).
+
+**Not covered**: force-killing the process (`kill -9`), or the machine
+crashing/sleeping for a long time — none of the above triggers can fire in
+those cases. If you're ever unsure, check
+`scripts/check_balance.sh` or the [RunPod console](https://www.runpod.io/console/pods)
+directly.
+
+The status line at the top of the page shows the current session pod (if
+any) and running cost; it refreshes automatically every ~10s, including
+after an idle-timeout auto-termination.
 
 ### Cost
 
 Everyone's usage draws from the **same shared account balance**. Rough math:
-an A100 80GB runs about **$1.40-1.50/hr**, and a typical video takes
-**~10-16 minutes end-to-end** (pod boot + render), so expect roughly
-**$0.25-0.40 per video**. 720p and longer audio clips cost more (more
-segments, more render time).
+an A100 80GB runs about **$1.40-1.50/hr**. For the **CLI** (one pod per
+call), a typical video costs roughly **$0.25-0.40** (~10-16 min end-to-end).
+For the **Gradio UI**, per-click cost is *not* the same as session cost once
+a pod is reused — a click after the first can be much cheaper (no redeploy/
+recompile), but the pod keeps billing during any idle gaps between clicks
+too. Trust the UI's own "session so far: ~$X" figure over a per-video
+estimate. 720p and longer audio clips cost more either way (more segments,
+more render time); `--no-distill` costs roughly 6x a normal render.
 
 Check remaining balance any time with:
 
@@ -141,10 +181,13 @@ If you're about to generate a large batch, check balance first.
 
 ### Troubleshooting
 
-- **The pod always terminates itself**, even if the run fails or you hit
-  Ctrl-C — you shouldn't need to clean anything up manually. If a run
-  prints `CRITICAL: pod ... may STILL BE RUNNING AND BILLING`, that's the
-  one case where it didn't — check the
+- **The CLI's pod always terminates itself**, even if the run fails or you
+  hit Ctrl-C — you shouldn't need to clean anything up manually there. The
+  **Gradio UI**'s session pod terminates on the four triggers listed above
+  (not literally every click) — see that section if a pod seems to be
+  lingering. Either way, if a run prints
+  `CRITICAL: pod ... may STILL BE RUNNING AND BILLING`, that's the one case
+  automatic cleanup didn't work — check the
   [RunPod console](https://www.runpod.io/console/pods) or
   `scripts/check_balance.sh` and terminate it by hand.
 - **`--dry-run` fails immediately** with a GPU-availability error — no
@@ -157,5 +200,9 @@ If you're about to generate a large batch, check balance first.
   you ever end up running pieces of this by hand over SSH, read
   [`decisions.md`](decisions.md#2-generation-stack--ab-decided-2026-07-25-longcat-video-avatar-15-wins)
   first.
+- **Articulation/mimicry looks exaggerated, or the prompt seems to do
+  nothing** — expected in the default distilled mode (see `--no-distill`
+  above); try `--audio-gain-db` first (free), then `--no-distill` (6x cost)
+  if that's not enough.
 - **General infra questions** (SSH details, GPU/region behavior, registry
   auth) — see [`infra-notes.md`](infra-notes.md).

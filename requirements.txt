@@ -5,4 +5,7 @@
 # stdlib-only (raw ssh/scp via subprocess, matching this project's proven
 # pattern -- no paramiko). gradio is the only dependency here, scoped to
 # scripts/app_gradio.py alone.
-gradio>=4.0,<6.0
+#
+# >=4.38 specifically: scripts/app_gradio.py uses gr.Timer (added in 4.38)
+# to poll session-pod status for the browser without requiring a click.
+gradio>=4.38,<6.0
