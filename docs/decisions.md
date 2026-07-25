@@ -7,18 +7,58 @@ Dated 2026-07-21 (prep phase — no pod deployed yet).
 open-source TTS clone (Fish Speech / CosyVoice2 / IndexTTS-2 don't have
 confirmed Ukrainian support as of this check).
 
-## 2. Generation stack — A/B on the same volume
-- **Baseline: Wan2.1-I2V-14B (720p) + InfiniteTalk**, ComfyUI, via
+## 2. Generation stack — A/B decided 2026-07-25: **LongCat-Video-Avatar-1.5 wins**
+
+- **Winner: LongCat-Video-Avatar-1.5** (Meituan/MeiGen-AI, released
+  2026-05-21, MIT license). Whisper-Large-v3 audio conditioning (genuinely
+  multilingual, unlike InfiniteTalk's Chinese-specific wav2vec2), 8-step
+  distilled inference (`--use_distill`). Standalone Python script, no
+  ComfyUI. User verdict on the corrected render (`--stage_1=ai2v`, see
+  below): "практично ідеальний" (practically perfect) — clearly better
+  lip-sync/mimicry than InfiniteTalk's best render, and correct identity
+  preservation once the invocation bug was fixed.
+  - **Exact working invocation** (also encoded in
+    `scripts/run_longcat_avatar.sh`, which additionally auto-computes
+    `--num_segments` from the input audio's real duration):
+    ```bash
+    torchrun --nproc_per_node=1 run_demo_avatar_single_audio_to_video.py \
+      --checkpoint_dir=/workspace/longcat-weights/LongCat-Video-Avatar-1.5 \
+      --stage_1=ai2v \
+      --num_segments=<computed, see below> \
+      --input_json=<path to {"prompt","cond_image","cond_audio":{"person1":...}}> \
+      --use_distill --model_type avatar-v1.5 --resolution 480p
+    ```
+  - **`--stage_1` must be `ai2v`, never `at2v`.** `at2v` is audio+text-to-video
+    with **no image conditioning at all** — `cond_image` is never read on
+    that code path. The first real attempt used `at2v` by mistake (copied
+    from a doc example without checking which stage actually consumes the
+    photo) and produced a fluent, well-lip-synced video of a **completely
+    different, unrelated person** — confirmed live 2026-07-25, user caught
+    it immediately from the output ("це зовсім інша людина"). `ai2v` is the
+    upstream script's own argparse default.
+  - **`--num_segments` must cover the audio length**, not be left at its
+    default of 1. avatar-v1.5's hardcoded constants are `num_frames=93`,
+    `save_fps=25`, `num_cond_frames=13` — one segment is only
+    `93/25 = 3.72s` of video regardless of audio length; each additional
+    segment (via the long-video continuation / KV-cache path) adds
+    `(93-13)/25 = 3.2s`. Formula: `segments = 1 + ceil((audio_seconds - 3.72)
+    / 3.2)`. Our 12.05s test clip needed 4 segments (~13.3s of video,
+    correctly covers it). Leaving this at 1 truncates the phrase mid-sentence
+    — also confirmed live on the same bad first render.
+  - Render time: ~10 min wall-clock for a 4-segment 480p clip on one A100
+    80GB (checkpoint load + vocal separation + torch.compile warmup ~5min
+    one-time cost, ~2min/segment after that).
+- **Runner-up: Wan2.1-I2V-14B (720p) + InfiniteTalk**, ComfyUI, via
   `ComfyUI-WanVideoWrapper` (Kijai). Verified 2026-07: InfiniteTalk has **no**
   Wan2.2 backbone — the repo is frozen on `Wan2.1-I2V-14B-480P` as its base
   weights (the ComfyUI branch additionally supports the 720p checkpoint).
-- **Challenger: LongCat-Video-Avatar-1.5** (Meituan/MeiGen-AI, released
-  2026-05-21, MIT license). Swaps Wav2Vec2 for Whisper-Large-v3 audio
-  conditioning, 8-step distilled inference (`--use_distill`), optional INT8
-  (`--use_int8`) to fit VRAM. Standalone Python scripts, no ComfyUI.
-- Both get a Docker image (`docker/infinitetalk`, `docker/longcat-avatar`) so
-  either can be pulled and run without a rebuild. See `ab-test-plan.md` for
-  the comparison protocol and decision rule.
+  Second render (after fixing a sampler-settings mismatch) was rated
+  "значно краще" (much better) but still had lip-sync/language-mismatch and
+  per-window motion-instability complaints that LongCat doesn't share.
+- Both images are kept (registry storage is cheap, and a second opinion
+  stays available) — `docker/infinitetalk`, `docker/longcat-avatar`. See
+  `ab-test-plan.md` for the full comparison protocol/rubric this decision
+  was based on.
 
 ## 3. Network volume
 Created 2026-07-24: id **`fl7pl7z0sz`**, name `ai-avatar-video`, DC
@@ -96,16 +136,18 @@ Square MP4/H.264, ≤60s, diameter 384-640px; thumbnail JPEG ≤200KB/≤320px.
 Telegram rounds client-side — no manual circular masking needed.
 
 ## Still open
-- Which stack wins the A/B (InfiniteTalk has rendered twice, second pass
-  much better after a sampler-settings fix; LongCat render is in progress
-  2026-07-25 on verified-intact weights, not yet compared).
-- Whether SageAttention gets built on top of either image (deferred to the
-  actual pod — see `infra-notes.md`).
+- Whether SageAttention gets built on top of the LongCat image (deferred to
+  the actual pod — see `infra-notes.md`).
 - Turn the ad hoc weight-integrity check (size-compare every local file
   against the HF API) into a real script, and consider running it as a
   standard last step of both download scripts rather than only on-demand
   after a failure.
-- Once a stack wins the A/B: build a simple end-user UI (upload photo +
-  audio, get back the Telegram video note) in front of whichever pipeline
-  is kept — not started yet, deliberately deferred until the A/B result is
-  in so it isn't built against the losing stack's invocation shape.
+- Build a simple end-user UI in front of LongCat (upload photo + audio +
+  prompt, get back the Telegram video note) — the pipeline shape is now
+  locked in (`scripts/run_longcat_avatar.sh`), so this can start.
+- Get a real ElevenLabs Ukrainian voice-clone sample to replace the
+  placeholder Russian `celyj.mp3` test clip.
+- Pod for the A/B was terminated 2026-07-25 after the winning render
+  (network volume `fl7pl7z0sz` persists with all weights intact) — next
+  session needs a fresh `pod_up.py` deploy against the `longcat-avatar`
+  image before any further rendering.

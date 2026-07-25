@@ -77,6 +77,21 @@ paper over) unless render time/VRAM makes the other stack impractical on a
 single A100 80GB. Keep both Docker images regardless — the cost of keeping
 them is just registry storage, and a second opinion is cheap once built.
 
-## Not yet run
-This plan is written; no render has happened yet (no pod has been deployed —
-see `infra-notes.md` for what "deploying" actually takes once we're ready).
+## Result (2026-07-25): LongCat-Video-Avatar-1.5 wins
+
+Both stacks rendered on the same test inputs (`face_8.jpg` synthetic face,
+`celyj.mp3` 12s placeholder audio, same A100 80GB pod class):
+
+| | InfiniteTalk (2nd render, post sampler-fix) | LongCat (post `ai2v`/`--num_segments` fix) |
+|---|---|---|
+| Lip-sync accuracy | Rated "значно краще" than v1, but still didn't match phonemes well | Rated "практично ідеальний" — clearly better |
+| Identity stability | Earring/identity jitter across the 5 stitched windows | Stable, correct identity once `ai2v` was used |
+| Render time (480p) | ~43 min (5 windows × ~8.6 min) | ~10 min (4 segments, incl. one-time compile warmup) |
+| Invocation | ComfyUI HTTP API (`scripts/comfyui_workflow_to_api.py`) | Plain CLI (`scripts/run_longcat_avatar.sh`) |
+
+**Decision: LongCat-Video-Avatar-1.5, `--stage_1=ai2v`, is the pipeline going
+forward.** See `decisions.md#2-generation-stack` for the exact locked
+invocation and the two bugs that had to be fixed first (`at2v` silently
+drops the reference photo; default `--num_segments=1` truncates any audio
+longer than ~3.7s). Both Docker images are kept, but LongCat is what any
+future UI/automation should be built against.
