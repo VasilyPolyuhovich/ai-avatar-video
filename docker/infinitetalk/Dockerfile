@@ -89,11 +89,19 @@ RUN python3 -m pip install --upgrade pip \
     && python3 -c "import kornia.geometry.epipolar.essential" \
     && python3 -c "import torch._dynamo"
 
+# opencv-python-headless: InfiniteTalk's own requirements.txt doesn't list
+# it, but its utils.py does `import cv2` directly -- without it the node
+# fails to load (ModuleNotFoundError: No module named 'cv2', silently
+# skipped by ComfyUI as "IMPORT FAILED" rather than a hard error, confirmed
+# on the actual pod 2026-07-25). headless variant: no GUI libs needed on a
+# server with no display.
 RUN mkdir -p custom_nodes \
     && git clone --branch comfyui https://github.com/MeiGen-AI/InfiniteTalk.git custom_nodes/InfiniteTalk \
     && cd custom_nodes/InfiniteTalk \
     && git checkout 7089f0a7c84d2cb20709599fb08444ab3bc837ce \
-    && pip install -r requirements.txt
+    && pip install -r requirements.txt \
+    && pip install opencv-python-headless \
+    && python3 -c "import cv2; print('cv2', cv2.__version__)"
 
 # Bundle the maintainers' own example workflow (single-speaker InfiniteTalk)
 # so the pod has a known-working node graph to load in ComfyUI immediately,
