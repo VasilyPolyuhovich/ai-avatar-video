@@ -20,14 +20,26 @@ seeing either one run on the actual target photo.
    MP4/H.264 ≤60s per the brief's output spec.
 
 ### How each stack is actually invoked
-- **InfiniteTalk**: open ComfyUI (SSH tunnel to :8188), load the bundled
-  `infinitetalk_single_example.json` workflow (baked into the image at
-  `/opt/workflows`, symlinked into ComfyUI's own workflow browser). Repoint
-  the model dropdowns per the note at the end of
-  `scripts/download_weights_infinitetalk.sh` (the example defaults to a
-  lighter 480p fp8 model + a step-distill LoRA; swap in the 720p fp16
-  weights for the real comparison, keep the LoRA only for the fast 480p
-  first-look pass).
+- **InfiniteTalk**: the plan was to open ComfyUI's UI (SSH tunnel to :8188)
+  and drive it via Claude for Chrome browser automation, but the extension
+  wasn't reachable from the pod session (2026-07-25) -- worked around it
+  entirely via ComfyUI's own HTTP API instead, no browser needed:
+  `scripts/comfyui_workflow_to_api.py` converts the bundled
+  `/opt/workflows/infinitetalk_single_example.json` (its raw UI/graph
+  format) into ComfyUI's API prompt format using the pod's live
+  `/object_info` schemas, then `POST /prompt` triggers the render directly.
+  Test image/audio (`face_8.jpg`/`celyj.mp3`) already sit in
+  `/workspace/input`, auto-discovered by ComfyUI's upload-widget combo
+  lists. **Don't reuse the demo's sampler settings as-is**: it defaults to
+  a lighter 480p fp8 model + `steps=4, cfg=1.0, scheduler=flowmatch_distill`
+  tuned specifically for a step-distillation LoRA -- if you skip that LoRA
+  (as the script's overrides do, for a full-fp16 quality run) but keep
+  those sampler settings, the diffusion process is starved of steps and
+  the output is blurry/unstable (confirmed live: first real render looked
+  terrible for exactly this reason). The script's
+  `apply_infinitetalk_single_overrides()` already reverts to
+  `WanVideoSampler`'s own non-distilled defaults (steps=30, cfg=6.0,
+  scheduler=unipc) and points the model loaders at the 720p fp16 weights.
 - **LongCat**: SSH in, write an `input_json` (schema confirmed against
   `meituan-longcat/LongCat-Video`'s `assets/avatar/single_example_1.json`):
   ```json
