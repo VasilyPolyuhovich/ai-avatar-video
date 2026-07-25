@@ -5,68 +5,78 @@ sized for a Telegram video note), on RunPod GPUs. Full goal/spec/constraints:
 [`ai-video-message-brief.md`](ai-video-message-brief.md). Locked decisions and
 their reasoning: [`docs/decisions.md`](docs/decisions.md).
 
-## Status: prepared, not deployed
+## Status: A/B decided, generation pipeline automated
 
-Everything in this repo was built **without renting a GPU pod**. What exists:
+The A/B test is **decided**: **LongCat-Video-Avatar-1.5** beat InfiniteTalk
+(better lip-sync, correct identity preservation, faster renders) — see
+[`docs/decisions.md`](docs/decisions.md#2-generation-stack--ab-decided-2026-07-25-longcat-video-avatar-15-wins).
+The full deploy → render → retrieve → terminate pipeline is proven working
+end-to-end and is now a one-command tool.
 
-- A **150GB network volume** on RunPod (`fl7pl7z0sz`, US-MD-1) — created, empty.
-  Two RunPod accounts exist for this project; see
+**Want to generate a video?** Start at
+[`docs/generate-video.md`](docs/generate-video.md) — it covers setup and
+day-to-day usage for both the CLI and a local point-and-click UI.
+
+What exists:
+
+- A **250GB network volume** on RunPod (`fl7pl7z0sz`, US-MD-1), holding both
+  stacks' model weights (verified intact). Two RunPod accounts exist for
+  this project; see
   [`docs/infra-notes.md`](docs/infra-notes.md#two-runpod-accounts) for which
   one is active by default and how to target the other.
 - Two **Docker images**, built and verified working by this repo's CI on
-  every push to `docker/**`:
+  every push to `docker/**`, and both real-pod-tested with actual renders:
+  - `ghcr.io/vasilypolyuhovich/ai-avatar-longcat:latest` — **the winning
+    stack**, LongCat-Video-Avatar-1.5, standalone (no ComfyUI).
   - `ghcr.io/vasilypolyuhovich/ai-avatar-infinitetalk:latest` — ComfyUI +
-    `ComfyUI-WanVideoWrapper` + InfiniteTalk (Wan2.1-14B I2V backbone).
-  - `ghcr.io/vasilypolyuhovich/ai-avatar-longcat:latest` — LongCat-Video-Avatar-1.5,
-    standalone (no ComfyUI). Its `flash-attn` build needed 6 CI iterations to
-    get right (see the Dockerfile's comments) — the image now builds cleanly
-    and `import flash_attn` is verified to succeed.
+    `ComfyUI-WanVideoWrapper` + InfiniteTalk (Wan2.1-14B I2V backbone). Kept
+    for reference; not the default going forward.
   - Both are commit-pinned (exact SHAs in each Dockerfile's header) so a pull
     later reproduces exactly what was tested, not whatever the upstream repos
     happen to contain by then.
-- No model weights are downloaded or baked in anywhere — they're multi-GB and
-  belong on the volume, not the image or this git history. Download scripts
-  are written (`scripts/download_weights_*.sh`) but not execution-tested.
-- No pod has been created. `scripts/pod_up.py` deploys one on request.
+- `scripts/generate_avatar_video.py` — deploys a fresh on-demand pod, renders
+  a photo+audio+prompt into a video, retrieves it, and always terminates the
+  pod (even on error/Ctrl-C). `scripts/app_gradio.py` is a minimal local UI
+  on top of it. See `docs/generate-video.md` for full usage, including how
+  colleagues get set up with a shared account credential.
+- `scripts/pod_up.py` — the lower-level building block (GPU ranking, deploy,
+  verified boot, auto-retry) both the orchestrator and manual ops use
+  directly.
 
-See [`docs/ab-test-plan.md`](docs/ab-test-plan.md) for why there are two
-images and how the winner gets picked, and
-[`docs/infra-notes.md`](docs/infra-notes.md) for the persistence/cost/SSH
-details specific to this setup.
+See [`docs/ab-test-plan.md`](docs/ab-test-plan.md) for the full comparison
+that decided the winner, and [`docs/infra-notes.md`](docs/infra-notes.md)
+for the persistence/cost/SSH details specific to this setup.
 
 ## Layout
 
 ```
-docker/infinitetalk/     Dockerfile + entrypoint + supervisor for the ComfyUI stack
-docker/longcat-avatar/   Dockerfile + entrypoint for the LongCat standalone stack
-scripts/pod_up.py        Deploy a pod: cheapest in-stock GPU, verified boot, auto-retry
+docker/longcat-avatar/          Dockerfile + entrypoint for the LongCat standalone stack (winner)
+docker/infinitetalk/            Dockerfile + entrypoint + supervisor for the ComfyUI stack (reference)
+scripts/generate_avatar_video.py  One-command generation: deploy -> render -> retrieve -> terminate
+scripts/app_gradio.py           Minimal local web UI on top of generate_avatar_video.py
+scripts/run_longcat_avatar.sh   The verified LongCat invocation (runs on the pod)
+scripts/pod_up.py               Deploy a pod: cheapest in-stock GPU, verified boot, auto-retry
 scripts/download_weights_*.sh   Pull each stack's weights onto the volume (run on the pod)
-scripts/autostop.sh      Daily self-stop (run on the pod; needs the account key)
-scripts/check_balance.sh Local balance/runway check
-docs/                    Decisions, A/B test plan, infra notes
-.github/workflows/       CI: build + push both images to GHCR
+scripts/autostop.sh             Daily self-stop (run on the pod; needs the account key)
+scripts/check_balance.sh        Local balance/runway check
+requirements.txt                Local tooling deps (gradio, for app_gradio.py only)
+docs/                           Decisions, A/B test plan, infra notes, generate-video how-to
+.github/workflows/               CI: build + push both images to GHCR
 ```
 
-## When it's time to actually deploy
+## Quick start
 
 ```bash
-# 1. Rank live GPU stock/price without spending anything
-python3 scripts/pod_up.py --dry-run
+# Generate a video (see docs/generate-video.md for full setup first)
+python3 scripts/generate_avatar_video.py --image photo.jpg --audio voice.mp3
 
-# 2. Deploy the InfiniteTalk image (default), verify it boots, print the URL
-python3 scripts/pod_up.py --wait
-
-# 3. To try the LongCat image instead
-IMAGE=ghcr.io/vasilypolyuhovich/ai-avatar-longcat:latest \
-  PORTS=22/tcp python3 scripts/pod_up.py
-
-# 4. Once SSH'd in (suffix from the RunPod Connect panel -- see docs/infra-notes.md):
-bash scripts/download_weights_infinitetalk.sh   # or download_weights_longcat.sh
-
-# 5. When done for the session -- just Stop/Terminate in the console,
-#    or use scripts/check_balance.sh's account key to call podStop via the API
+# Or the local web UI
+python3 scripts/app_gradio.py
 ```
 
 Requires `~/.runpod-key-video` (account key) and
 `~/.runpod/ssh/runpodctl-video-ssh-key[.pub]` locally — see
-[`docs/infra-notes.md`](docs/infra-notes.md#two-runpod-accounts).
+[`docs/generate-video.md`](docs/generate-video.md) for the full one-time
+setup (including for colleagues) and
+[`docs/infra-notes.md`](docs/infra-notes.md#two-runpod-accounts) for the
+account details.

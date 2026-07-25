@@ -1,0 +1,8 @@
+# Local tooling dependencies only -- NOT used inside the Docker images
+# (docker/*/Dockerfile each pin their own requirements independently).
+#
+# scripts/pod_up.py and scripts/generate_avatar_video.py are deliberately
+# stdlib-only (raw ssh/scp via subprocess, matching this project's proven
+# pattern -- no paramiko). gradio is the only dependency here, scoped to
+# scripts/app_gradio.py alone.
+gradio>=4.0,<6.0
