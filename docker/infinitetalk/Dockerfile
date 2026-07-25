@@ -2,11 +2,16 @@
 # Weights are NOT baked in -- mount the RunPod network volume at /workspace and
 # run scripts/download_weights_infinitetalk.sh once (see docs/infra-notes.md).
 #
-# Pinned (2026-07-21, torch/kornia pins added 2026-07-24 after real pod testing):
+# Pinned (2026-07-21, torch/kornia pins + node packs added 2026-07-24/25
+# after real pod testing -- first actual render succeeded 2026-07-25):
 #   ComfyUI                    v0.28.0
 #   InfiniteTalk (comfyui br.) 7089f0a7c84d2cb20709599fb08444ab3bc837ce (2025-08-19)
+#     -- plus a one-line patch to its own utils.py, see NOTE below
 #   torch/vision/audio          2.8.0 / 0.23.0 / 2.8.0 (+cu129)
 #   kornia                      0.7.1 (ComfyUI's own dep, see NOTE below)
+#   ComfyUI-VideoHelperSuite    4ee72c065db22c9d96c2427954dc69e7b908444b
+#   ComfyUI-KJNodes             e27a505b3ba6ce42687fe00500deda103d9d6071
+#   audio-separation-nodes-comfyui ac339561973f0c1e56db2f9d40f11b0fddda6763
 #
 # NOTE: the InfiniteTalk "comfyui" branch IS a fork of Kijai's
 # ComfyUI-WanVideoWrapper with InfiniteTalk support merged in (its own
@@ -95,13 +100,52 @@ RUN python3 -m pip install --upgrade pip \
 # skipped by ComfyUI as "IMPORT FAILED" rather than a hard error, confirmed
 # on the actual pod 2026-07-25). headless variant: no GUI libs needed on a
 # server with no display.
+#
+# The sed below patches a real bug in InfiniteTalk's own image-loading code
+# (infinitetalk/utils.py, extract_specific_frames): the VIDEO branch
+# correctly normalizes frames to float32 [0,1] (ComfyUI's universal IMAGE
+# tensor convention), but the static-IMAGE branch just did
+# `np.array(img)`, leaving it uint8 [0,255]. That silently-wrong tensor
+# propagates through the resize node and crashes at
+# WanVideoClipVisionEncode with `"upsample_bilinear2d_out_frame" not
+# implemented for 'Byte'` -- confirmed live on the pod 2026-07-25, first
+# real render attempt. Since our whole use case is a single reference
+# PHOTO (not video), this branch is the one that actually matters for us.
 RUN mkdir -p custom_nodes \
     && git clone --branch comfyui https://github.com/MeiGen-AI/InfiniteTalk.git custom_nodes/InfiniteTalk \
     && cd custom_nodes/InfiniteTalk \
     && git checkout 7089f0a7c84d2cb20709599fb08444ab3bc837ce \
     && pip install -r requirements.txt \
     && pip install opencv-python-headless \
-    && python3 -c "import cv2; print('cv2', cv2.__version__)"
+    && python3 -c "import cv2; print('cv2', cv2.__version__)" \
+    && sed -i 's#frame = np.array(img)#frame = (np.array(img) / 255.0).astype(np.float32)#' \
+       infinitetalk/utils.py \
+    && grep -q 'astype(np.float32)' infinitetalk/utils.py \
+    && python3 -m py_compile infinitetalk/utils.py
+
+# The example workflow also needs three more node packs it doesn't itself
+# declare as dependencies (ComfyUI silently reports these as "IMPORT
+# FAILED" per-node rather than refusing to boot, so the gap only shows up
+# when you actually try to run the workflow -- confirmed live on the pod
+# 2026-07-25 via /object_info returning empty for each class before these
+# were installed):
+#   - VHS_VideoCombine          <- ComfyUI-VideoHelperSuite (final MP4 export)
+#   - ImageResizeKJv2           <- ComfyUI-KJNodes (reference-image resize)
+#   - AudioCrop, AudioSeparation <- audio-separation-nodes-comfyui
+#     (isolates vocals from the driving audio before lip-sync embedding,
+#     so background music doesn't drive mouth motion)
+RUN cd custom_nodes \
+    && git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git \
+    && cd ComfyUI-VideoHelperSuite && git checkout 4ee72c065db22c9d96c2427954dc69e7b908444b \
+    && pip install -r requirements.txt
+RUN cd custom_nodes \
+    && git clone https://github.com/kijai/ComfyUI-KJNodes.git \
+    && cd ComfyUI-KJNodes && git checkout e27a505b3ba6ce42687fe00500deda103d9d6071 \
+    && pip install -r requirements.txt
+RUN cd custom_nodes \
+    && git clone https://github.com/christian-byrne/audio-separation-nodes-comfyui.git \
+    && cd audio-separation-nodes-comfyui && git checkout ac339561973f0c1e56db2f9d40f11b0fddda6763 \
+    && pip install -r requirements.txt
 
 # Bundle the maintainers' own example workflow (single-speaker InfiniteTalk)
 # so the pod has a known-working node graph to load in ComfyUI immediately,
