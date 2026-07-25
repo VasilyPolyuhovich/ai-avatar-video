@@ -21,12 +21,45 @@ confirmed Ukrainian support as of this check).
   the comparison protocol and decision rule.
 
 ## 3. Network volume
-Created 2026-07-24: id **`fl7pl7z0sz`**, name `ai-avatar-video`, **150GB**,
-DC **US-MD-1** (Secure), on the account this project now uses by default
-(`~/.runpod-key-video` — see `infra-notes.md`). Sized for both stacks'
-weights (~50-70GB InfiniteTalk + ~30-40GB LongCat) plus outputs/cache
-headroom. A network volume is DC-locked — any pod deploy that attaches it
-must pin `dataCenterId: US-MD-1`.
+Created 2026-07-24: id **`fl7pl7z0sz`**, name `ai-avatar-video`, DC
+**US-MD-1** (Secure), on the account this project now uses by default
+(`~/.runpod-key-video` — see `infra-notes.md`). A network volume is
+DC-locked — any pod deploy that attaches it must pin `dataCenterId:
+US-MD-1`.
+
+**Resized 150GB → 250GB on 2026-07-25** (`PATCH /v1/networkvolumes/{id}`
+`{"size": 250}`, in place, no data loss, confirmed) after LongCat's actual
+weight footprint (both repos combined, post-`--exclude`) turned out bigger
+than the original ~30-40GB estimate — the volume hit 95% full (50GB
+InfiniteTalk + 91GB LongCat-partial vs 150GB cap) mid-download and started
+throwing `OSError: [Errno 122] Disk quota exceeded`. `df -h /workspace`
+is **not** useful for checking free space on this volume — it reports the
+MooseFS cluster's total capacity (hundreds of TB), not the per-volume
+quota; only an actual quota-exceeded error or the RunPod console's own
+volume-size field tell the truth.
+
+### Weight-download corruption — root cause (2026-07-25)
+Multiple LongCat weight downloads on this volume silently corrupted files
+(final size 2-3MB **larger** than the real HuggingFace size — not a
+truncation, an overwrite/append artifact), across both the `xet` fast-
+transfer backend and the classic HTTP downloader (`HF_HUB_DISABLE_XET=1`),
+plus separate unrelated hangs (a cross-filesystem `mv`, a `.gitignore.lock`
+wait) earlier in the same session. The common factor across every incident
+is **concurrent multi-threaded writes to this specific MooseFS-backed
+network volume** — `hf download`'s default 8 parallel workers, each writing
+a different large shard at once. One incident (a `hf_xet` "background
+writer channel closed" crash) happened right at the 142GB/150GB quota
+boundary and was very likely just a badly-surfaced disk-quota error, not
+evidence of xet itself being unreliable — but a *later* crash, same
+symptom (bytes added, not lost), happened well after the resize with
+plenty of headroom, using the plain HTTP downloader, which rules out quota
+as the sole explanation. Working theory: the volume's write-durability
+under concurrent load is the weak point, independent of which HF download
+backend is in use. Mitigation applied: `scripts/download_weights_longcat.sh`
+now passes `--max-workers 4` (default is 8) to both downloads, and every
+download should be followed by a full per-file size check against the HF
+API before trusting the weights (ad hoc Python one-liner used this
+session; not yet turned into a standing script — see "Still open" below).
 
 (History, all same day, 2026-07-24 — the volume was empty at every move so
 none of this cost anything but time:
@@ -63,6 +96,16 @@ Square MP4/H.264, ≤60s, diameter 384-640px; thumbnail JPEG ≤200KB/≤320px.
 Telegram rounds client-side — no manual circular masking needed.
 
 ## Still open
-- Which stack wins the A/B (decided after the first real render, not yet run).
+- Which stack wins the A/B (InfiniteTalk has rendered twice, second pass
+  much better after a sampler-settings fix; LongCat render is in progress
+  2026-07-25 on verified-intact weights, not yet compared).
 - Whether SageAttention gets built on top of either image (deferred to the
   actual pod — see `infra-notes.md`).
+- Turn the ad hoc weight-integrity check (size-compare every local file
+  against the HF API) into a real script, and consider running it as a
+  standard last step of both download scripts rather than only on-demand
+  after a failure.
+- Once a stack wins the A/B: build a simple end-user UI (upload photo +
+  audio, get back the Telegram video note) in front of whichever pipeline
+  is kept — not started yet, deliberately deferred until the A/B result is
+  in so it isn't built against the losing stack's invocation shape.

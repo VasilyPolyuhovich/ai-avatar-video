@@ -46,7 +46,20 @@ seeing either one run on the actual target photo.
   {"prompt": "<gesture prompt>", "cond_image": "/path/to/photo.png",
    "cond_audio": {"person1": "/path/to/audio.mp3"}}
   ```
-  then `torchrun run_demo_avatar_single_audio_to_video.py --checkpoint_dir=/workspace/longcat-weights/LongCat-Video-Avatar-1.5 --stage_1=at2v --input_json=<path> --use_distill --model_type avatar-v1.5 --resolution 480P` (drop `--use_int8` unless VRAM is tight on the chosen GPU).
+  then `torchrun run_demo_avatar_single_audio_to_video.py --checkpoint_dir=/workspace/longcat-weights/LongCat-Video-Avatar-1.5 --stage_1=ai2v --num_segments=4 --input_json=<path> --use_distill --model_type avatar-v1.5 --resolution 480p` (drop `--use_int8` unless VRAM is tight on the chosen GPU).
+  **`--stage_1` must be `ai2v` (the script's own default), not `at2v`** — `at2v`
+  is audio+text-to-video with **no image conditioning at all** (`cond_image`
+  is never read in that code path); only `ai2v` loads `input_data['cond_image']`
+  and actually passes it into the pipeline. Running `at2v` produces a
+  plausible-looking talking head that ignores the reference photo entirely —
+  confirmed live 2026-07-25: the first real render used `at2v` by mistake and
+  came back as a completely different, unrelated face. Also note `--resolution`
+  takes **lowercase** `480p`/`720p`, and a single segment is only
+  `num_frames/save_fps` = 93/25 ≈ **3.7s** of video regardless of audio
+  length — `--num_segments` must be raised (each extra segment adds
+  `(num_frames-num_cond_frames)/save_fps` ≈ 3.2s) to cover the full clip, or
+  the audio gets cut off mid-phrase (also confirmed live: same first-render
+  mistake).
 
 ## Rubric (1-5 each, notes required for any score ≤3)
 | Criterion | What to look for |
