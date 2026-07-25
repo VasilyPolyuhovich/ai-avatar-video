@@ -10,7 +10,7 @@ This project now has two RunPod accounts available, kept side by side (no
 
 | | Account key file | SSH key | Network volume |
 |---|---|---|---|
-| **Active (default)** | `~/.runpod-key-video` | `~/.runpod/ssh/runpodctl-video-ssh-key[.pub]` | `fl7pl7z0sz`, 150GB, US-MD-1 |
+| **Active (default)** | `~/.runpod-key-video` | `~/.runpod/ssh/runpodctl-video-ssh-key[.pub]` | `fl7pl7z0sz`, 250GB (resized from 150GB 2026-07-25), US-MD-1 |
 | Original | `~/.runpod-key` | `~/.runpod/ssh/runpodctl-ssh-key[.pub]` | none (`plk85ofiny` 404'd, deleted at some point — cause unknown, nothing was stored on it) |
 
 `scripts/pod_up.py` and `scripts/check_balance.sh` default to the active
