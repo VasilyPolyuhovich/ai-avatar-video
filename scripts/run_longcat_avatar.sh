@@ -36,8 +36,9 @@ Options:
                              full 50-step sampler instead, which is the ONLY
                              way text_guidance_scale/audio_guidance_scale
                              (upstream defaults 4.0/4.0) actually matter.
-                             ~6x more inference steps per segment -> ~6x
-                             longer render and cost. See the note below.
+                             Roughly 17x longer render per segment, not just
+                             the 6x the step-count ratio alone would suggest
+                             -- see the note below.
 EOF
   exit 1
 }
@@ -51,7 +52,15 @@ EOF
 # exaggerated in every render -- that's expected, not a bug, given
 # text_guidance_scale=1.0/audio_guidance_scale=1.0 in the default (distilled)
 # mode this script has always used. --no-distill is the only way to get that
-# control back; it costs roughly 6x the render time (50 steps vs 8).
+# control back -- but it costs roughly 17x the render time per segment, NOT
+# ~6x as the 50-vs-8 step-count ratio alone would suggest: a non-distilled
+# step also takes ~2.7x longer on its own (full classifier-free guidance
+# runs two forward passes per step -- conditional + unconditional -- vs the
+# distilled DMD LoRA's one), confirmed live (~38.5s/step vs ~14.5s/step).
+# scripts/generate_avatar_video.py's caller-side --timeout auto-scales to
+# 10800s for --no-distill for exactly this reason -- an earlier version
+# left the short distilled-mode default in place and it killed a real
+# --no-distill render at 82% through segment 1 of 3.
 IMAGE=""
 AUDIO=""
 PROMPT="A person speaks calmly to the camera in a steady, natural tone, with a neutral, composed expression."
@@ -78,7 +87,7 @@ done
 
 if [[ -z "$DISTILL_FLAG" ]]; then
   echo "--no-distill: running the full 50-step sampler (text/audio guidance" >&2
-  echo "scale 4.0/4.0 apply) -- expect roughly 6x the usual render time." >&2
+  echo "scale 4.0/4.0 apply) -- expect roughly 17x the usual per-segment render time." >&2
 fi
 
 [[ -n "$IMAGE" && -n "$AUDIO" ]] || usage

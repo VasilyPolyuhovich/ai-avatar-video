@@ -16,10 +16,13 @@ cost expectations) -- this docstring only covers the tool itself.
 
 Cost safety: the pod is ALWAYS terminated in a finally block, including on
 crash or Ctrl-C, and the remote render step has a hard timeout
-(--timeout, default 1800s) so a stuck run can't bill indefinitely. If
-terminate() itself ever fails, that failure is printed loudly rather than
-silently swallowed -- if you ever see a "may STILL BE RUNNING AND BILLING"
-message, check the RunPod console immediately.
+(--timeout, default 1800s -- automatically 10800s when --no-distill is set,
+since the full 50-step sampler is roughly 17x slower per segment than the
+default 8-step distilled one, not just 6x as step-count alone would
+suggest) so a stuck run can't bill indefinitely. If terminate() itself ever
+fails, that failure is printed loudly rather than silently swallowed -- if
+you ever see a "may STILL BE RUNNING AND BILLING" message, check the
+RunPod console immediately.
 
 This module also exposes PodSession (used by scripts/app_gradio.py) for
 keeping ONE pod alive across several renders instead of paying the ~5 min
@@ -47,6 +50,26 @@ sys.path.insert(0, str(SCRIPT_DIR))  # so `import pod_up` works regardless of ca
 import pod_up  # noqa: E402
 
 DEFAULT_IMAGE_REF = "ghcr.io/vasilypolyuhovich/ai-avatar-longcat:latest"
+
+# Default hard timeout for the remote render step (--timeout). The
+# --no-distill default is deliberately much larger than a naive "50/8 steps
+# = ~6x" estimate would suggest: confirmed live 2026-07-25, a non-distilled
+# step took ~38.5s vs a distilled step's ~14.5s (full classifier-free
+# guidance runs TWO forward passes per step -- conditional + unconditional
+# -- vs the distilled DMD LoRA's one), so the real slowdown per segment is
+# closer to (50*38.5)/(8*14.5) =~ 17x, not 6x. The original 1800s default
+# killed a real --no-distill render at 82% through segment 1 of 3 (of
+# denoising alone) -- wasted GPU spend from an under-sized timeout, not an
+# actual failure. Long audio (many segments) can still exceed even this
+# larger default; pass --timeout explicitly for anything unusually long.
+DEFAULT_RUN_TIMEOUT_S = 1800
+DEFAULT_RUN_TIMEOUT_S_NO_DISTILL = 10800
+
+
+def _resolve_run_timeout(run_timeout_s, no_distill):
+    if run_timeout_s is not None:
+        return run_timeout_s
+    return DEFAULT_RUN_TIMEOUT_S_NO_DISTILL if no_distill else DEFAULT_RUN_TIMEOUT_S
 
 # The exact line scripts/run_longcat_avatar.sh prints (to stderr) announcing
 # the final output path -- the single source of truth for where the result
@@ -250,7 +273,7 @@ def wait_for_ssh(account_key, pod_id, key_path, endpoint_timeout, ready_timeout,
 
 def render_on_pod(ip, port, key_path, image_path, audio_path, *,
                    prompt=None, resolution="480p", num_segments=None,
-                   output_path=None, run_timeout_s=1800, job_id=None,
+                   output_path=None, run_timeout_s=None, job_id=None,
                    no_distill=False, audio_gain_db=None,
                    log=print, remote_log=None):
     """Render on an already-SSH-ready pod. Raises on any failure, does not
@@ -266,7 +289,14 @@ def render_on_pod(ip, port, key_path, image_path, audio_path, *,
     no_distill: passed through to run_longcat_avatar.sh's --no-distill --
     the ONLY way text_guidance_scale/audio_guidance_scale actually affect
     the output (the upstream script forces both to 1.0 whenever the
-    distilled LoRA is active, unconditionally). Costs ~6x the render time.
+    distilled LoRA is active, unconditionally). Costs roughly 17x the
+    render time per segment (confirmed live: ~38.5s/step non-distilled vs
+    ~14.5s/step distilled -- full classifier-free guidance runs two forward
+    passes per step, not one -- so it's step-count AND per-step cost both
+    increasing, not step-count alone). run_timeout_s=None auto-scales to
+    DEFAULT_RUN_TIMEOUT_S_NO_DISTILL for exactly this reason -- an early
+    version left the short distilled-mode default in place here and it
+    killed a real --no-distill render at 82% through segment 1 of 3.
 
     audio_gain_db: if set, applies an ffmpeg volume filter to a LOCAL copy
     of the audio before upload (original file on disk is untouched) --
@@ -276,6 +306,7 @@ def render_on_pod(ip, port, key_path, image_path, audio_path, *,
     """
     if remote_log is None:
         remote_log = log
+    run_timeout_s = _resolve_run_timeout(run_timeout_s, no_distill)
     if job_id is None:
         job_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + uuid.uuid4().hex[:6]
 
@@ -315,11 +346,11 @@ def render_on_pod(ip, port, key_path, image_path, audio_path, *,
 
     remote_cmd = build_remote_cmd(paths, prompt, resolution, num_segments, no_distill=no_distill)
     if no_distill:
-        log("--no-distill: running the full 50-step sampler -- expect roughly "
-            "6x the usual render time.")
+        log(f"--no-distill: running the full 50-step sampler -- roughly 17x the "
+            f"usual per-segment render time (timeout set to {run_timeout_s}s).")
     log("starting generation -- this takes roughly 10-16 minutes on a fresh pod "
-        "(much less if the pod's torch.compile cache is already warm), "
-        "streaming remote progress below:")
+        "(much less if the pod's torch.compile cache is already warm, much more "
+        "with --no-distill), streaming remote progress below:")
     output_filename = None
     for line in run_ssh_streaming(ip, port, key_path, remote_cmd, run_timeout_s, on_line=remote_log):
         m = FINAL_OUTPUT_RE.match(line.strip())
@@ -454,7 +485,7 @@ class PodSession:
         return self.ip, self.port, self.key_path
 
     def render(self, image_path, audio_path, *, prompt=None, resolution="480p",
-               num_segments=None, output_path=None, run_timeout_s=1800,
+               num_segments=None, output_path=None, run_timeout_s=None,
                no_distill=False, audio_gain_db=None, status_cb=None):
         log, remote_log = _make_loggers(status_cb)
         with self._lock:
@@ -535,7 +566,7 @@ def generate_avatar_video(
     network_volume_id=pod_up.DEFAULT_NETWORK_VOLUME_ID,
     image_ref=DEFAULT_IMAGE_REF,
     start_timeout=600, ssh_endpoint_timeout=120, ssh_ready_timeout=180,
-    run_timeout_s=1800, dry_run=False, status_cb=None,
+    run_timeout_s=None, dry_run=False, status_cb=None,
 ):
     """Deploy a fresh LongCat pod, render image+audio+prompt into a video,
     retrieve it, and terminate the pod -- always, even on error/Ctrl-C.
@@ -603,7 +634,8 @@ def _cli():
     p.add_argument("--no-distill", action="store_true",
                     help="Disable the 8-step distilled sampler -- the only way "
                          "--prompt/guidance scale actually affect the output. "
-                         "~6x longer render.")
+                         "~17x longer render per segment (not just the ~6x step-"
+                         "count ratio alone -- see --timeout).")
     p.add_argument("--audio-gain-db", type=float,
                     help="Apply an ffmpeg volume filter (dB, e.g. -6) to a local "
                          "copy of the audio before upload -- quieter audio tends "
@@ -611,8 +643,11 @@ def _cli():
     p.add_argument("--max-price", type=float, default=pod_up.DEFAULT_MAX_PRICE)
     p.add_argument("--min-vram", type=float, default=pod_up.DEFAULT_MIN_VRAM)
     p.add_argument("--gpu-match", default=pod_up.DEFAULT_GPU_MATCH)
-    p.add_argument("--timeout", type=int, default=1800,
-                    help="Hard timeout in seconds for the remote render step (default 1800)")
+    p.add_argument("--timeout", type=int, default=None,
+                    help="Hard timeout in seconds for the remote render step. "
+                         "Default: 1800, or 10800 automatically with --no-distill "
+                         "(the full sampler is ~17x slower per segment, not the "
+                         "~6x step-count ratio alone would suggest).")
     p.add_argument("--dry-run", action="store_true",
                     help="Rank GPUs and print the command that would run -- no deploy, no spend")
     p.add_argument("--json", action="store_true",

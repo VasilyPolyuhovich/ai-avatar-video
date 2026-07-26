@@ -197,8 +197,18 @@ upstream script as written. Two mitigations added, both opt-in:
   `generate_avatar_video.py`/`PodSession`/the Gradio UI's Advanced section):
   disables the distilled LoRA entirely, restoring the full 50-step sampler
   and the upstream defaults (`text_guidance_scale`/`audio_guidance_scale`
-  = 4.0) — the only real lever for prompt/guidance control. Costs roughly
-  6x the usual render time/cost; not the default.
+  = 4.0) — the only real lever for prompt/guidance control. **Costs roughly
+  17x the usual render time/cost per segment**, confirmed live 2026-07-25 —
+  not just the ~6x the 50-vs-8 step-count ratio alone would suggest, since
+  a non-distilled step is also individually ~2.7x slower (full
+  classifier-free guidance runs two forward passes per step vs the
+  distilled DMD LoRA's one; observed ~38.5s/step vs ~14.5s/step). Not the
+  default. `generate_avatar_video.py`'s `--timeout` auto-scales from 1800s
+  to 10800s when `--no-distill` is set for exactly this reason — the first
+  real test run hit the *old*, too-short default and got killed by the
+  local hard-timeout safeguard at 82% through segment 1 of 3, wasting the
+  GPU time already spent (the render itself was working fine; the timeout,
+  sized for distilled-mode expectations, was the bug).
 - `--audio-gain-db`: applies an `ffmpeg volume` filter to a **local** copy
   of the driving audio before upload (original file untouched). Cheap,
   free-of-GPU-cost lever based on the empirical observation that the

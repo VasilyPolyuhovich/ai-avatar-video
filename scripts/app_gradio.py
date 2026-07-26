@@ -122,7 +122,7 @@ with gr.Blocks(title="AI Avatar Video") as demo:
                     label="Disable distilled sampler (--no-distill)",
                     value=False,
                     info="Full 50-step sampler -- the only way the prompt/guidance "
-                         "actually affects the result. ~6x longer render.")
+                         "actually affects the result. ~17x longer render per segment.")
                 audio_gain_in = gr.Number(
                     label="Audio gain (dB)", value=0,
                     info="Negative = quieter. Quieter audio tends to reduce "

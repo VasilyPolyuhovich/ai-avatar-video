@@ -114,8 +114,13 @@ Useful flags:
   scale generally) actually affects the output** — the distilled mode this
   tool uses by default forces both text and audio guidance to their
   minimum regardless of what you ask for, which is also why articulation
-  can look exaggerated with the default settings. Costs roughly **6x** the
-  usual render time/cost.
+  can look exaggerated with the default settings. **Costs roughly 17x the
+  usual render time/cost per segment** (not just the ~6x the step-count
+  ratio alone would suggest — a non-distilled step is also individually
+  ~2.7x slower, confirmed live: ~38.5s/step vs ~14.5s/step, since full
+  guidance runs two forward passes per step instead of one). `--timeout`
+  auto-scales to 3 hours for `--no-distill` runs for exactly this reason —
+  don't override it downward unless you know your audio is short.
 - `--audio-gain-db -6` (or similar) — apply a volume reduction to a local
   copy of your audio before upload. Quieter, flatter delivery tends to
   produce less exaggerated mouth articulation, since the model's motion
@@ -169,7 +174,10 @@ a pod is reused — a click after the first can be much cheaper (no redeploy/
 recompile), but the pod keeps billing during any idle gaps between clicks
 too. Trust the UI's own "session so far: ~$X" figure over a per-video
 estimate. 720p and longer audio clips cost more either way (more segments,
-more render time); `--no-distill` costs roughly 6x a normal render.
+more render time); `--no-distill` costs roughly **17x** a normal render per
+segment, not just the ~6x its step count alone would suggest — budget
+accordingly (e.g. a 3-segment `--no-distill` clip took over 26 minutes of
+GPU time just to reach 82% of segment 1 in testing).
 
 Check remaining balance any time with:
 
@@ -202,7 +210,15 @@ If you're about to generate a large batch, check balance first.
   first.
 - **Articulation/mimicry looks exaggerated, or the prompt seems to do
   nothing** — expected in the default distilled mode (see `--no-distill`
-  above); try `--audio-gain-db` first (free), then `--no-distill` (6x cost)
-  if that's not enough.
+  above); try `--audio-gain-db` first (free), then `--no-distill` (~17x
+  render cost per segment — budget time/money accordingly) if that's not
+  enough.
+- **A `--no-distill` run got killed with "remote command exceeded ...s --
+  killed"** — the render was very likely progressing fine, just slower than
+  the timeout budget. `--timeout` auto-scales to 10800s (3 hours) for
+  `--no-distill` automatically; for unusually long audio (many segments),
+  pass an even larger `--timeout` explicitly. The pod still terminates
+  correctly when this happens (cost-safety held, GPU time already spent on
+  that attempt is real but not compounding).
 - **General infra questions** (SSH details, GPU/region behavior, registry
   auth) — see [`infra-notes.md`](infra-notes.md).
