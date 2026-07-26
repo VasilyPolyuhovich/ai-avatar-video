@@ -32,6 +32,27 @@ Options:
   --resolution 480p|720p    Default: 480p
   --num-segments N          Default: auto-computed from audio duration.
   --output-dir PATH         Default: ./outputs_avatar_single
+  --end-trim-s N            Seconds trimmed off the very end of the final
+                             output (default: 0, i.e. off). Opt-in
+                             mitigation for a recurring model behavior, not
+                             a bug in this script: the distilled sampler
+                             tends toward a slight "closing" smile at the
+                             end of each generated chunk (see
+                             docs/decisions.md) -- invisible in
+                             intermediate segments (the next segment's real
+                             audio-driven motion overwrites it), visible
+                             only in the final one since nothing continues
+                             past it. NOT safe to default on: confirmed
+                             live 2026-07-26 that the artifact's onset can
+                             overlap with genuine trailing speech, so a
+                             fixed value risks cutting real words, not just
+                             the artifact -- there is no one value that's
+                             safe for every clip. Preview the untrimmed
+                             result first and only set this if you can see
+                             real silence/pause to spare at the very end.
+                             Best-effort: a trim failure leaves the
+                             untrimmed file in place rather than failing
+                             the render.
   --no-distill              Disable the 8-step distilled LoRA -- runs the
                              full 50-step sampler instead, which is the ONLY
                              way text_guidance_scale/audio_guidance_scale
@@ -69,6 +90,7 @@ RESOLUTION="480p"
 NUM_SEGMENTS=""
 OUTPUT_DIR="./outputs_avatar_single"
 DISTILL_FLAG="--use_distill"
+END_TRIM_S="0"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -79,6 +101,7 @@ while [[ $# -gt 0 ]]; do
     --resolution) RESOLUTION="$2"; shift 2 ;;
     --num-segments) NUM_SEGMENTS="$2"; shift 2 ;;
     --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
+    --end-trim-s) END_TRIM_S="$2"; shift 2 ;;
     --no-distill) DISTILL_FLAG=""; shift ;;
     -h|--help) usage ;;
     *) echo "Unknown arg: $1" >&2; usage ;;
@@ -126,7 +149,7 @@ else
 fi
 
 cd /opt/LongCat-Video
-exec torchrun --nproc_per_node=1 run_demo_avatar_single_audio_to_video.py \
+torchrun --nproc_per_node=1 run_demo_avatar_single_audio_to_video.py \
   --checkpoint_dir="$CHECKPOINT_DIR" \
   --stage_1=ai2v \
   --num_segments="$NUM_SEGMENTS" \
@@ -135,3 +158,35 @@ exec torchrun --nproc_per_node=1 run_demo_avatar_single_audio_to_video.py \
   --model_type avatar-v1.5 \
   --resolution "$RESOLUTION" \
   --output_dir "$OUTPUT_DIR"
+
+if [[ "$NUM_SEGMENTS" -eq 1 ]]; then
+  FINAL_FILE="$OUTPUT_DIR/ai2v_demo_1.mp4"
+else
+  FINAL_FILE="$OUTPUT_DIR/video_continue_${NUM_SEGMENTS}.mp4"
+fi
+
+# End-trim: best-effort and deliberately non-fatal. Generation already
+# succeeded by this point (torchrun above returned 0); a trim glitch must
+# never turn a successful render into a reported failure -- run it in a
+# subshell with its own `set -e`, capture only ITS exit status, and fall
+# back to the untrimmed file on any problem.
+set +e
+(
+  set -e
+  [[ "$END_TRIM_S" != "0" && -f "$FINAL_FILE" ]] || exit 0
+  DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$FINAL_FILE")
+  NEW_DURATION=$(python3 -c "d = max(0.0, $DURATION - $END_TRIM_S); print(d if d >= 1.0 else 0)")
+  if [[ "$NEW_DURATION" == "0" ]]; then
+    echo "Skipping end-trim: video too short (${DURATION}s)" >&2
+    exit 0
+  fi
+  TRIMMED_TMP="${FINAL_FILE%.mp4}-trimmed.mp4"
+  ffmpeg -y -i "$FINAL_FILE" -t "$NEW_DURATION" -c copy "$TRIMMED_TMP"
+  mv "$TRIMMED_TMP" "$FINAL_FILE"
+  echo "End-trimmed ${END_TRIM_S}s off the final segment (chunk-boundary closing-expression mitigation, see docs/decisions.md) -> ${NEW_DURATION}s total" >&2
+)
+TRIM_STATUS=$?
+set -e
+if [[ $TRIM_STATUS -ne 0 ]]; then
+  echo "WARNING: end-trim step failed (exit $TRIM_STATUS) -- leaving untrimmed output in place" >&2
+fi

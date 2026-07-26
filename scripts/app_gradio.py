@@ -41,7 +41,7 @@ IDLE_TIMEOUT_S = int(pod_up.env("IDLE_TIMEOUT_S", "900") or "900")
 session = PodSession(idle_timeout_s=IDLE_TIMEOUT_S)
 
 
-def handle_submit(image, audio, prompt, resolution, no_distill, audio_gain_db):
+def handle_submit(image, audio, prompt, resolution, no_distill, end_trim_s):
     if not image or not audio:
         yield None, "Please provide both a photo and an audio clip."
         return
@@ -54,7 +54,7 @@ def handle_submit(image, audio, prompt, resolution, no_distill, audio_gain_db):
         try:
             local_path, job_id = session.render(
                 image, audio, prompt=prompt or None, resolution=resolution,
-                no_distill=no_distill, audio_gain_db=audio_gain_db or None,
+                no_distill=no_distill, end_trim_s=end_trim_s or None,
                 status_cb=q.put)
             box["result"] = (local_path, job_id, time.monotonic() - t0)
         except Exception as e:
@@ -98,11 +98,20 @@ def pod_status_text():
             f"~${session.session_cost_so_far():.2f}")
 
 
+EXAMPLE_PROMPTS = [
+    ["A person speaks calmly to the camera in a steady, natural tone, with a neutral, composed expression."],
+    ["A tired woman speaks softly and slowly with minimal, subtle lip movement. Her face stays mostly "
+     "still and relaxed between words, small restrained mouth motion, no exaggerated mouth opening, "
+     "calm low-energy delivery, natural micro-expressions only."],
+    ["A person speaks with warm, friendly energy, animated but controlled expression, natural hand-free "
+     "conversational delivery, looking directly at the camera."],
+]
+
 with gr.Blocks(title="AI Avatar Video") as demo:
     gr.Markdown(
         "# AI Avatar Video\n"
-        "Upload a photo and an audio clip, optionally add a prompt, and "
-        "generate a lip-synced talking-head video. The first click deploys "
+        "Upload a reference photo and a driving audio clip, add a prompt to shape tone and "
+        "expression, and generate a lip-synced talking-head video. The first click deploys "
         "a GPU pod (~10-16 min); later clicks in the same session reuse it "
         "and are much faster. Click **Stop pod** when done, or it "
         f"auto-terminates after {IDLE_TIMEOUT_S // 60} min idle -- see "
@@ -111,22 +120,32 @@ with gr.Blocks(title="AI Avatar Video") as demo:
     status_md = gr.Markdown(pod_status_text())
     with gr.Row():
         with gr.Column():
-            image_in = gr.Image(type="filepath", label="Photo")
+            image_in = gr.Image(type="filepath", label="Reference photo")
             audio_in = gr.Audio(type="filepath", label="Driving audio")
             prompt_in = gr.Textbox(
-                label="Prompt (optional)",
-                placeholder="A person speaks calmly to the camera in a steady, natural tone.")
+                label="Prompt",
+                lines=3,
+                value=EXAMPLE_PROMPTS[0][0],
+                info="Fully controls tone, demeanor, and how restrained or expressive the face "
+                     "looks -- it's not a decoration, it has a real, direct effect. See the "
+                     "example prompts below or docs/prompt-guide.md for what works.")
+            with gr.Accordion("Example prompts (click to use)", open=False):
+                gr.Examples(examples=EXAMPLE_PROMPTS, inputs=[prompt_in], label=None)
             resolution_in = gr.Radio(["480p", "720p"], value="480p", label="Resolution")
-            with gr.Accordion("Advanced", open=False):
+            with gr.Accordion("Advanced (rarely needed)", open=False):
+                end_trim_in = gr.Number(
+                    label="End trim (seconds)", value=0, minimum=0,
+                    info="The model tends to add a slight 'closing smile' at the very end of "
+                         "the last segment. This crops that many seconds off the end -- but "
+                         "only turn it on AFTER watching the untrimmed result once, since the "
+                         "same crop can cut real trailing speech on a different clip. 0 = off.")
                 no_distill_in = gr.Checkbox(
-                    label="Disable distilled sampler (--no-distill)",
+                    label="Full 50-step sampler (--no-distill)",
                     value=False,
-                    info="Full 50-step sampler -- the only way the prompt/guidance "
-                         "actually affects the result. ~17x longer render per segment.")
-                audio_gain_in = gr.Number(
-                    label="Audio gain (dB)", value=0,
-                    info="Negative = quieter. Quieter audio tends to reduce "
-                         "exaggerated mouth articulation. 0 = unchanged.")
+                    info="NOT RECOMMENDED: confirmed to distort facial geometry on this "
+                         "checkpoint, and ~17x slower per segment. Kept only as an escape "
+                         "hatch for experimentation -- use the prompt above to control "
+                         "expression instead, it's the lever that actually works safely.")
             with gr.Row():
                 submit_btn = gr.Button("Generate", variant="primary")
                 stop_btn = gr.Button("Stop pod")
@@ -136,7 +155,7 @@ with gr.Blocks(title="AI Avatar Video") as demo:
 
     submit_btn.click(
         handle_submit,
-        inputs=[image_in, audio_in, prompt_in, resolution_in, no_distill_in, audio_gain_in],
+        inputs=[image_in, audio_in, prompt_in, resolution_in, no_distill_in, end_trim_in],
         outputs=[video_out, status_out],
     )
     stop_btn.click(handle_stop, outputs=status_out)

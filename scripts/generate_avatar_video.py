@@ -155,7 +155,7 @@ def compute_remote_paths(job_id, image_path, audio_path):
     }
 
 
-def build_remote_cmd(paths, prompt, resolution, num_segments, no_distill=False):
+def build_remote_cmd(paths, prompt, resolution, num_segments, no_distill=False, end_trim_s=None):
     parts = [
         shlex.quote(paths["run_script"]),
         "--image", shlex.quote(paths["image"]),
@@ -169,6 +169,8 @@ def build_remote_cmd(paths, prompt, resolution, num_segments, no_distill=False):
         parts += ["--num-segments", shlex.quote(str(num_segments))]
     if no_distill:
         parts += ["--no-distill"]
+    if end_trim_s:
+        parts += ["--end-trim-s", shlex.quote(str(end_trim_s))]
     return " ".join(parts)
 
 
@@ -333,7 +335,7 @@ def wait_for_ssh(account_key, pod_id, key_path, endpoint_timeout, ready_timeout,
 def render_on_pod(ip, port, key_path, image_path, audio_path, *,
                    prompt=None, resolution="480p", num_segments=None,
                    output_path=None, run_timeout_s=None, job_id=None,
-                   no_distill=False, audio_gain_db=None,
+                   no_distill=False, audio_gain_db=None, end_trim_s=None,
                    log=print, remote_log=None):
     """Render on an already-SSH-ready pod. Raises on any failure, does not
     catch or terminate anything itself -- that's the caller's job (the CLI
@@ -345,23 +347,37 @@ def render_on_pod(ip, port, key_path, image_path, audio_path, *,
     passes its own job_id through explicitly so pod_name/job-dir/output-
     filename correlation matches what it deployed with.
 
-    no_distill: passed through to run_longcat_avatar.sh's --no-distill --
-    the ONLY way text_guidance_scale/audio_guidance_scale actually affect
-    the output (the upstream script forces both to 1.0 whenever the
-    distilled LoRA is active, unconditionally). Costs roughly 17x the
-    render time per segment (confirmed live: ~38.5s/step non-distilled vs
-    ~14.5s/step distilled -- full classifier-free guidance runs two forward
-    passes per step, not one -- so it's step-count AND per-step cost both
-    increasing, not step-count alone). run_timeout_s=None auto-scales to
-    DEFAULT_RUN_TIMEOUT_S_NO_DISTILL for exactly this reason -- an early
-    version left the short distilled-mode default in place here and it
-    killed a real --no-distill render at 82% through segment 1 of 3.
+    no_distill: passed through to run_longcat_avatar.sh's --no-distill,
+    which lets text_guidance_scale/audio_guidance_scale apply (the upstream
+    script forces both to 1.0 whenever the distilled LoRA is active).
+    NOT RECOMMENDED as a quality lever: confirmed live 2026-07-26 that
+    guidance_scale > 1.0 produces badly distorted ("rubbery") facial
+    geometry on this checkpoint, independent of step count -- the same
+    distortion showed up at the full 50-step upstream defaults here AND
+    when patched into the 8-step distilled sampler. See
+    docs/decisions.md#2-generation-stack. Kept only as an escape hatch for
+    future experimentation, not because it currently produces good output.
+    Also costs roughly 17x the render time per segment (confirmed live:
+    ~38.5s/step non-distilled vs ~14.5s/step distilled). run_timeout_s=None
+    auto-scales to DEFAULT_RUN_TIMEOUT_S_NO_DISTILL for exactly this reason.
 
     audio_gain_db: if set, applies an ffmpeg volume filter to a LOCAL copy
-    of the audio before upload (original file on disk is untouched) --
-    quieter/flatter input audio empirically produces less exaggerated
-    mouth articulation, since the model's motion signal correlates with
-    the driving audio's energy. Negative values attenuate (e.g. -6).
+    of the audio before upload (original file on disk is untouched).
+    CONFIRMED NO-OP as of 2026-07-25: LongCat's own audio pipeline
+    unconditionally normalizes the driving audio to a fixed -23 LUFS target
+    before encoding, regardless of input loudness, so this value never
+    reaches the model. Kept for backward compatibility, not because it
+    does anything -- see docs/decisions.md#2-generation-stack. Prefer
+    changing the prompt text instead (it fully drives the model's single
+    conditional pass at guidance=1.0); see docs/prompt-guide.md.
+
+    end_trim_s: passed through to run_longcat_avatar.sh's --end-trim-s.
+    Chops a fixed duration off the very end of the final output, opt-in
+    mitigation for a confirmed model behavior (a slight "closing" smile at
+    the end of the last generated chunk). Not safe to set by default --
+    the artifact's onset can overlap with genuine trailing speech, so a
+    value that's safe for one clip can cut real words on another. Only
+    set this after previewing the untrimmed render.
     """
     if remote_log is None:
         remote_log = log
@@ -403,7 +419,8 @@ def render_on_pod(ip, port, key_path, image_path, audio_path, *,
     scp_up(ip, port, key_path, str(SCRIPT_DIR / "run_longcat_avatar.sh"), paths["run_script"])
     run_ssh(ip, port, key_path, f"chmod +x {shlex.quote(paths['run_script'])}")
 
-    remote_cmd = build_remote_cmd(paths, prompt, resolution, num_segments, no_distill=no_distill)
+    remote_cmd = build_remote_cmd(paths, prompt, resolution, num_segments,
+                                   no_distill=no_distill, end_trim_s=end_trim_s)
     if no_distill:
         log(f"--no-distill: running the full 50-step sampler -- roughly 17x the "
             f"usual per-segment render time (timeout set to {run_timeout_s}s).")
@@ -547,7 +564,7 @@ class PodSession:
 
     def render(self, image_path, audio_path, *, prompt=None, resolution="480p",
                num_segments=None, output_path=None, run_timeout_s=None,
-               no_distill=False, audio_gain_db=None, status_cb=None):
+               no_distill=False, audio_gain_db=None, end_trim_s=None, status_cb=None):
         log, remote_log = _make_loggers(status_cb)
         with self._lock:
             if self._busy:
@@ -563,7 +580,7 @@ class PodSession:
                     ip, port, key_path, image_path, audio_path,
                     prompt=prompt, resolution=resolution, num_segments=num_segments,
                     output_path=output_path, run_timeout_s=run_timeout_s,
-                    no_distill=no_distill, audio_gain_db=audio_gain_db,
+                    no_distill=no_distill, audio_gain_db=audio_gain_db, end_trim_s=end_trim_s,
                     log=log, remote_log=remote_log)  # job_id=None -> fresh, by design
             except Exception as e:
                 log(f"render failed ({e}) -- terminating session pod so the "
@@ -621,7 +638,7 @@ class PodSession:
 def generate_avatar_video(
     image_path, audio_path, *,
     prompt=None, resolution="480p", num_segments=None, output_path=None,
-    no_distill=False, audio_gain_db=None,
+    no_distill=False, audio_gain_db=None, end_trim_s=None,
     min_vram=pod_up.DEFAULT_MIN_VRAM, max_price=pod_up.DEFAULT_MAX_PRICE,
     gpu_match=pod_up.DEFAULT_GPU_MATCH,
     network_volume_id=pod_up.DEFAULT_NETWORK_VOLUME_ID,
@@ -652,7 +669,7 @@ def generate_avatar_video(
         log(f"{len(ranked)} candidate GPU(s):")
         for g in ranked:
             log(f"  {g['id']:<42} {g['vram']:>4}G  ${g['price']:<6} stock={g['stock']}")
-        log(f"would run: {build_remote_cmd(paths, prompt, resolution, num_segments, no_distill=no_distill)}")
+        log(f"would run: {build_remote_cmd(paths, prompt, resolution, num_segments, no_distill=no_distill, end_trim_s=end_trim_s)}")
         return None
 
     pod_id, gpu_id, gpu_price = deploy_pod(
@@ -667,7 +684,7 @@ def generate_avatar_video(
             ip, port, key_path, image_path, audio_path,
             prompt=prompt, resolution=resolution, num_segments=num_segments,
             output_path=output_path, run_timeout_s=run_timeout_s, job_id=job_id,
-            no_distill=no_distill, audio_gain_db=audio_gain_db,
+            no_distill=no_distill, audio_gain_db=audio_gain_db, end_trim_s=end_trim_s,
             log=log, remote_log=remote_log)
         assert returned_job_id == job_id  # passed explicitly above, should echo back unchanged
 
@@ -693,14 +710,24 @@ def _cli():
     p.add_argument("--num-segments", type=int)
     p.add_argument("--output")
     p.add_argument("--no-distill", action="store_true",
-                    help="Disable the 8-step distilled sampler -- the only way "
-                         "--prompt/guidance scale actually affect the output. "
-                         "~17x longer render per segment (not just the ~6x step-"
-                         "count ratio alone -- see --timeout).")
+                    help="Disable the 8-step distilled sampler, letting guidance "
+                         "scale apply. NOT RECOMMENDED: confirmed to produce "
+                         "distorted facial geometry on this checkpoint, and costs "
+                         "~17x longer render per segment. Kept as an escape hatch, "
+                         "not a working quality lever -- see docs/decisions.md.")
     p.add_argument("--audio-gain-db", type=float,
-                    help="Apply an ffmpeg volume filter (dB, e.g. -6) to a local "
-                         "copy of the audio before upload -- quieter audio tends "
-                         "to reduce exaggerated mouth articulation.")
+                    help="Apply an ffmpeg volume filter (dB) to a local copy of "
+                         "the audio before upload. CONFIRMED NO-OP: LongCat "
+                         "normalizes loudness unconditionally before encoding, so "
+                         "this never reaches the model. Kept for backward "
+                         "compatibility only -- see docs/prompt-guide.md instead.")
+    p.add_argument("--end-trim-s", type=float,
+                    help="Trim this many seconds off the very end of the final "
+                         "output -- opt-in mitigation for a slight 'closing smile' "
+                         "the model tends toward at the end of the last generated "
+                         "chunk. Only set this after previewing the untrimmed "
+                         "render: the artifact's onset can overlap with genuine "
+                         "trailing speech, so no value is safe for every clip.")
     p.add_argument("--max-price", type=float, default=pod_up.DEFAULT_MAX_PRICE)
     p.add_argument("--min-vram", type=float, default=pod_up.DEFAULT_MIN_VRAM)
     p.add_argument("--gpu-match", default=pod_up.DEFAULT_GPU_MATCH)
@@ -720,6 +747,7 @@ def _cli():
             args.image, args.audio,
             prompt=args.prompt, resolution=args.resolution, num_segments=args.num_segments,
             output_path=args.output, no_distill=args.no_distill, audio_gain_db=args.audio_gain_db,
+            end_trim_s=args.end_trim_s,
             max_price=args.max_price, min_vram=args.min_vram,
             gpu_match=args.gpu_match, run_timeout_s=args.timeout, dry_run=args.dry_run,
         )

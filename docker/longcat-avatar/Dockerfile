@@ -58,11 +58,32 @@ ENV MAX_JOBS=2 \
 #   - `tritonserverclient==0.0.6` -- no such package on PyPI at all (likely
 #     a typo for `tritonclient`); it's a client for a remote Triton
 #     Inference Server, irrelevant to running run_demo_avatar_*.py locally.
-# Strip both rather than patch the vendored file.
+# Strip both rather than patch the vendored file. Also strip the pinned
+# `onnxruntime==1.16.3` (CPU-only) in favor of `onnxruntime-gpu` below.
 RUN pip install --no-build-isolation -r requirements.txt \
-    && grep -vE '^(libsndfile1|tritonserverclient)==' requirements_avatar.txt > requirements_avatar.filtered.txt \
+    && grep -vE '^(libsndfile1|tritonserverclient|onnxruntime)==' requirements_avatar.txt > requirements_avatar.filtered.txt \
     && pip install -r requirements_avatar.filtered.txt \
     && python3 -c "import flash_attn; print('flash_attn', flash_attn.__version__, 'import ok')"
+
+# accelerate: enables low_cpu_mem_usage=True in HF from_pretrained(), cutting
+# peak RAM and load time for the ~30GB DiT checkpoint (upstream script warns
+# "Cannot initialize model with low cpu memory usage" without it).
+#
+# onnxruntime-gpu (replaces requirements_avatar.txt's onnxruntime==1.16.3,
+# stripped above): audio-separator (the vocal-separator dependency that
+# actually calls onnxruntime) runs its Kim_Vocal_2.onnx model on CPU with
+# the plain `onnxruntime` package -- confirmed live 2026-07-26, ~49s per
+# render on CPU while the GPU sat idle. audio-separator's own `[gpu]` extra
+# expects `onnxruntime-gpu>=1.17`; modern onnxruntime-gpu builds (>=1.19)
+# are CUDA-12.x-compatible out of the box via minor-version compatibility,
+# no separate CUDA-12 package index needed (that was only true for older
+# 1.16.x-era releases). Only an import smoke test here, not a provider
+# check -- GitHub Actions' CI runners have no GPU, so asserting
+# CUDAExecutionProvider availability at build time would fail even on a
+# correct install; the real verification is the vocal-separator's own log
+# line on the next live pod render.
+RUN pip install accelerate onnxruntime-gpu \
+    && python3 -c "import accelerate, onnxruntime; print('accelerate', accelerate.__version__, 'onnxruntime', onnxruntime.__version__, 'import ok')"
 
 RUN mkdir -p weights outputs
 
