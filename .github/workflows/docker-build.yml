@@ -31,6 +31,9 @@ jobs:
           - name: longcat-avatar
             context: docker/longcat-avatar
             image: ai-avatar-longcat
+          - name: longcat-avatar-comfyui
+            context: docker/longcat-avatar-comfyui
+            image: ai-avatar-longcat-comfyui
     steps:
       - uses: actions/checkout@v4
 
