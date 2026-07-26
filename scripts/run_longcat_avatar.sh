@@ -33,17 +33,26 @@ Options:
   --num-segments N          Default: auto-computed from audio duration.
   --output-dir PATH         Default: ./outputs_avatar_single
   --end-trim-s N            Seconds trimmed off the very end of the final
-                             output (default: 1.2). Mitigates a recurring
-                             model behavior, not a bug in this script: the
-                             distilled sampler tends toward a slight
-                             "closing" smile at the end of each generated
-                             chunk (see docs/decisions.md) -- invisible in
+                             output (default: 0, i.e. off). Opt-in
+                             mitigation for a recurring model behavior, not
+                             a bug in this script: the distilled sampler
+                             tends toward a slight "closing" smile at the
+                             end of each generated chunk (see
+                             docs/decisions.md) -- invisible in
                              intermediate segments (the next segment's real
                              audio-driven motion overwrites it), visible
                              only in the final one since nothing continues
-                             past it. Set to 0 to disable. Best-effort: a
-                             trim failure leaves the untrimmed file in
-                             place rather than failing the render.
+                             past it. NOT safe to default on: confirmed
+                             live 2026-07-26 that the artifact's onset can
+                             overlap with genuine trailing speech, so a
+                             fixed value risks cutting real words, not just
+                             the artifact -- there is no one value that's
+                             safe for every clip. Preview the untrimmed
+                             result first and only set this if you can see
+                             real silence/pause to spare at the very end.
+                             Best-effort: a trim failure leaves the
+                             untrimmed file in place rather than failing
+                             the render.
   --no-distill              Disable the 8-step distilled LoRA -- runs the
                              full 50-step sampler instead, which is the ONLY
                              way text_guidance_scale/audio_guidance_scale
@@ -81,7 +90,7 @@ RESOLUTION="480p"
 NUM_SEGMENTS=""
 OUTPUT_DIR="./outputs_avatar_single"
 DISTILL_FLAG="--use_distill"
-END_TRIM_S="1.2"
+END_TRIM_S="0"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
