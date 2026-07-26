@@ -213,12 +213,22 @@ If you're about to generate a large batch, check balance first.
   above); try `--audio-gain-db` first (free), then `--no-distill` (~17x
   render cost per segment — budget time/money accordingly) if that's not
   enough.
-- **A `--no-distill` run got killed with "remote command exceeded ...s --
-  killed"** — the render was very likely progressing fine, just slower than
-  the timeout budget. `--timeout` auto-scales to 10800s (3 hours) for
-  `--no-distill` automatically; for unusually long audio (many segments),
-  pass an even larger `--timeout` explicitly. The pod still terminates
-  correctly when this happens (cost-safety held, GPU time already spent on
-  that attempt is real but not compounding).
+- **A `--no-distill` run failed with "remote command exceeded ...s"** — the
+  render was very likely progressing fine, just slower than the timeout
+  budget. `--timeout` auto-scales to 10800s (3 hours) for `--no-distill`
+  automatically; for unusually long audio (many segments), pass an even
+  larger `--timeout` explicitly. The pod still terminates correctly when
+  this happens (cost-safety held, GPU time already spent on that attempt is
+  real but not compounding).
+- **Your local network hiccups mid-render (WiFi drop, laptop sleep, VPN
+  reconnect)** — this used to kill the whole render (and terminate the
+  pod), even though the actual generation on the pod might have kept going
+  fine. Fixed: the render now runs detached on the pod and is monitored via
+  reconnecting polls rather than one fragile SSH stream held open for the
+  whole render — a network blip just costs a few missed status updates,
+  tolerated up to **30 minutes** of lost contact before giving up. If you
+  see `lost contact with pod for over 1800s`, that's this backstop finally
+  giving up after real, prolonged connectivity loss, not a first-hiccup
+  overreaction.
 - **General infra questions** (SSH details, GPU/region behavior, registry
   auth) — see [`infra-notes.md`](infra-notes.md).

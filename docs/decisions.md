@@ -216,6 +216,40 @@ upstream script as written. Two mitigations added, both opt-in:
   quieter/flatter audio tends to reduce exaggerated articulation without
   needing `--no-distill` at all. Worth trying first.
 
+### Resilient remote render: survive local network drops (2026-07-26)
+
+A real `--no-distill` render (up to ~2 hours) got killed twice by a
+transient LOCAL network problem (client WiFi/laptop sleep/VPN reconnect —
+nothing to do with the pod), burning real GPU spend both times. Root cause:
+the render ran via one long-lived foreground SSH exec held open for the
+entire render; when that single connection dropped, sshd almost certainly
+delivered SIGHUP to the remote process tree, killing the actual `torchrun`
+render on the pod, not just the local monitoring view of it — and the
+resulting exception then triggered pod termination via `PodSession`'s
+error-handling contract, destroying a render that may have been
+progressing completely normally.
+
+**Fix**: `render_on_pod` now launches the remote command **detached**
+(`setsid nohup ... > log 2>&1 < /dev/null & disown` — survives the SSH
+session dying) and monitors it via short-lived reconnecting polls
+(`run_remote_detached`, byte-offset `tail -c +N` reads) instead of one
+fragile stream. A local network blip now costs a few missed poll cycles,
+tolerated up to 30 minutes of lost contact, not a dead render. Reviewed via
+a Plan-agent pass before implementation (same practice as the `PodSession`
+work) — caught two real bugs in the first draft: a marker-based
+full-log-refetch design that silently corrupted the incremental display
+stream by one character per poll (fixed with authoritative byte-offset
+tracking, verified against a local simulation including a poll landing
+mid-multi-byte-UTF-8-character), and a redesign that would have broken
+`output_filename` extraction for every single render (the new function
+returns accumulated text once rather than streaming lines, so
+`render_on_pod` now scans the *returned* text, not a per-line generator).
+
+Unchanged, explicitly not solved by this fix: total local-process death
+(`kill -9`, dead battery, OS crash) still leaves the pod running with
+nothing to terminate it — `check_balance.sh`/RunPod console remain the
+backstop, same as before.
+
 ## Still open
 - Whether SageAttention gets built on top of the LongCat image (deferred to
   the actual pod — see `infra-notes.md`).

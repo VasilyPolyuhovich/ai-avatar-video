@@ -22,7 +22,19 @@ default 8-step distilled one, not just 6x as step-count alone would
 suggest) so a stuck run can't bill indefinitely. If terminate() itself ever
 fails, that failure is printed loudly rather than silently swallowed -- if
 you ever see a "may STILL BE RUNNING AND BILLING" message, check the
-RunPod console immediately.
+RunPod console immediately. This guarantee is contingent on the LOCAL
+process surviving long enough to run its finally/signal handlers -- a
+SIGKILL, dead battery, or OS crash on your machine still leaves the pod
+running with nothing to terminate it; scripts/check_balance.sh or the
+RunPod console remain the backstop for that case.
+
+Reliability: the render itself (render_on_pod/run_remote_detached) runs
+DETACHED on the pod and is monitored via reconnecting polls, not one
+long-lived SSH stream -- a transient LOCAL network blip (WiFi hiccup,
+laptop sleep, VPN reconnect) used to kill the actual remote render via
+SIGHUP when the one monitoring connection died (confirmed live, twice, real
+GPU spend wasted). Now it just costs a few missed poll cycles, tolerated up
+to 30 minutes of lost contact before giving up.
 
 This module also exposes PodSession (used by scripts/app_gradio.py) for
 keeping ONE pod alive across several renders instead of paying the ~5 min
@@ -160,12 +172,13 @@ def build_remote_cmd(paths, prompt, resolution, num_segments, no_distill=False):
     return " ".join(parts)
 
 
-def run_ssh(ip, port, key_path, remote_cmd, timeout=60):
+def run_ssh(ip, port, key_path, remote_cmd, timeout=60, text=True):
     cmd = ["ssh", "-p", str(port), *pod_up.ssh_flags(key_path),
            "-o", "ConnectTimeout=15", f"root@{ip}", remote_cmd]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    r = subprocess.run(cmd, capture_output=True, text=text, timeout=timeout)
     if r.returncode != 0:
-        raise RuntimeError(f"ssh command failed ({r.returncode}): {remote_cmd}\n{r.stderr}")
+        stderr = r.stderr if text else r.stderr.decode(errors="replace")
+        raise RuntimeError(f"ssh command failed ({r.returncode}): {remote_cmd}\n{stderr}")
     return r.stdout
 
 
@@ -183,38 +196,84 @@ def scp_down(ip, port, key_path, remote_path, local_path, timeout=300):
         raise RuntimeError(f"scp download failed ({r.returncode}): {remote_path} -> {local_path}\n{r.stderr}")
 
 
-def run_ssh_streaming(ip, port, key_path, remote_cmd, timeout_s, on_line=None):
-    """Generator yielding each combined stdout+stderr line as it arrives.
-    No -tt/PTY -- that was only ever needed for RunPod's ssh.runpod.io
-    proxy; direct root@ip:port SSH (confirmed working all session) doesn't
-    need it, and a PTY makes stdout/stderr merging behave worse, not better.
+def run_remote_detached(ip, port, key_path, remote_cmd, remote_job_dir, run_timeout_s, *,
+                         poll_interval=10, max_disconnect_s=1800, on_line=None):
+    """Launch remote_cmd DETACHED from the SSH session (setsid+nohup, stdio
+    redirected to a file, backgrounded+disowned -- survives the SSH
+    connection dying, unlike a foreground `ssh ... "cmd"` exec) and monitor
+    it via repeated short-lived reconnecting polls instead of one fragile
+    long-lived stream.
+
+    This replaces an earlier design (one unbroken SSH stream for the whole
+    render) that let a transient LOCAL network blip -- the client's WiFi,
+    a laptop sleeping, a VPN reconnect, nothing to do with the pod itself --
+    kill the actual remote torchrun process via SIGHUP on disconnect
+    (confirmed live, twice, real GPU spend wasted both times: a foreground
+    SSH exec with no nohup/setsid dies with its session). Now a blip just
+    costs a few missed poll cycles (tolerated up to max_disconnect_s), not
+    a dead render and a terminated pod.
+
+    Raises TimeoutError if run_timeout_s (wall clock) elapses, RuntimeError
+    if the remote command exits non-zero or reconnection fails for longer
+    than max_disconnect_s. Returns the full accumulated remote log text on
+    success -- render_on_pod scans THIS returned text (not the on_line
+    stream, which only ever sees incremental deltas) for the "Final output
+    will be: ..." line.
+
+    Byte-accurate: polls fetch raw bytes (not text-decoded) so the local
+    read offset tracked between polls exactly matches the remote file's
+    real byte position, immune to a multi-byte UTF-8 boundary landing
+    mid-character (render logs contain multi-byte progress-bar block
+    characters) -- decoding for display only happens after the offset math
+    is already done, with errors="replace" so a transient decode hiccup
+    can't corrupt tracking.
     """
-    cmd = ["ssh", "-p", str(port), *pod_up.ssh_flags(key_path),
-           "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=6",
-           f"root@{ip}", remote_cmd]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                             text=True, bufsize=1)
-    timed_out = threading.Event()
+    log_path = f"{remote_job_dir}/render.log"
+    exit_path = f"{remote_job_dir}/render.exit"
+    marker = f"@@EXIT_{uuid.uuid4().hex}@@"
+    launch = (
+        f"rm -f {shlex.quote(exit_path)}; "
+        f"setsid nohup bash -c {shlex.quote(remote_cmd + '; echo $? > ' + shlex.quote(exit_path))} "
+        f"> {shlex.quote(log_path)} 2>&1 < /dev/null & disown"
+    )
+    run_ssh(ip, port, key_path, launch, timeout=30)
 
-    def _on_timeout():
-        timed_out.set()
-        proc.kill()
+    chunks = []
+    offset = 0
+    deadline = time.time() + run_timeout_s
+    last_success = time.time()
+    while True:
+        if time.time() > deadline:
+            raise TimeoutError(f"remote command exceeded {run_timeout_s}s")
+        poll_cmd = (
+            f"tail -c +{offset + 1} {shlex.quote(log_path)} 2>/dev/null; "
+            f"printf '%s' {shlex.quote(marker)}; "
+            f"(test -f {shlex.quote(exit_path)} && cat {shlex.quote(exit_path)}) || echo RUNNING"
+        )
+        try:
+            raw = run_ssh(ip, port, key_path, poll_cmd, timeout=30, text=False)
+            last_success = time.time()
+        except Exception as e:
+            if time.time() - last_success > max_disconnect_s:
+                raise RuntimeError(
+                    f"lost contact with pod for over {max_disconnect_s}s: {e}")
+            time.sleep(poll_interval)
+            continue
 
-    timer = threading.Timer(timeout_s, _on_timeout)
-    timer.start()
-    try:
-        assert proc.stdout is not None
-        for line in proc.stdout:
+        new_bytes, _, rest = raw.partition(marker.encode())
+        if new_bytes:
+            offset += len(new_bytes)  # exact remote byte count, no re-encoding round-trip
+            chunks.append(new_bytes)
             if on_line:
-                on_line(line)
-            yield line
-    finally:
-        rc = proc.wait()
-        timer.cancel()
-    if timed_out.is_set():
-        raise TimeoutError(f"remote command exceeded {timeout_s}s -- killed")
-    if rc != 0:
-        raise subprocess.CalledProcessError(rc, remote_cmd)
+                for line in new_bytes.decode(errors="replace").splitlines(keepends=True):
+                    on_line(line)
+        status = rest.strip().decode(errors="replace")
+        if status != "RUNNING":
+            exit_code = int(status) if status.lstrip("-").isdigit() else 1
+            if exit_code != 0:
+                raise RuntimeError(f"remote command exited with code {exit_code}")
+            return b"".join(chunks).decode(errors="replace")
+        time.sleep(poll_interval)
 
 
 def deploy_pod(account_key, public_key, job_id, min_vram, max_price, gpu_match,
@@ -351,8 +410,10 @@ def render_on_pod(ip, port, key_path, image_path, audio_path, *,
     log("starting generation -- this takes roughly 10-16 minutes on a fresh pod "
         "(much less if the pod's torch.compile cache is already warm, much more "
         "with --no-distill), streaming remote progress below:")
+    log_text = run_remote_detached(ip, port, key_path, remote_cmd, paths["job_dir"],
+                                    run_timeout_s, on_line=remote_log)
     output_filename = None
-    for line in run_ssh_streaming(ip, port, key_path, remote_cmd, run_timeout_s, on_line=remote_log):
+    for line in log_text.splitlines():
         m = FINAL_OUTPUT_RE.match(line.strip())
         if m:
             output_filename = m.group(1)
