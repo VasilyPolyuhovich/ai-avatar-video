@@ -210,11 +210,101 @@ upstream script as written. Two mitigations added, both opt-in:
   GPU time already spent (the render itself was working fine; the timeout,
   sized for distilled-mode expectations, was the bug).
 - `--audio-gain-db`: applies an `ffmpeg volume` filter to a **local** copy
-  of the driving audio before upload (original file untouched). Cheap,
-  free-of-GPU-cost lever based on the empirical observation that the
-  model's motion signal correlates with the driving audio's energy —
-  quieter/flatter audio tends to reduce exaggerated articulation without
-  needing `--no-distill` at all. Worth trying first.
+  of the driving audio before upload (original file untouched).
+
+  **Superseded 2026-07-26: this is a confirmed no-op, not a real lever.**
+  `LongCat-Video`'s own audio pipeline (`get_audio_embedding_whisper()` →
+  `_loudness_norm()`) unconditionally normalizes the driving audio to a
+  fixed -23 LUFS target before any encoding happens, regardless of the
+  input's actual loudness — so any `--audio-gain-db` value gets normalized
+  away before the model ever sees it. Confirmed by reading the actual
+  upstream source, not just by the render output. Do not recommend this
+  flag as a mitigation; it has no effect on output. Left in the codebase
+  as a harmless no-op rather than removed outright (not worth a breaking
+  CLI change for a flag that costs nothing to leave in place).
+
+### ComfyUI migration abandoned; guidance-scale confirmed broken independent of distillation (2026-07-26)
+
+Investigated migrating LongCat rendering to ComfyUI
+(`kijai/ComfyUI-WanVideoWrapper`) specifically to get continuous
+`audio_scale`/`audio_cfg_scale` control not gated by the `--use_distill`
+override above — this node pack exposes exactly that as real, independent,
+continuously-valued inputs on `LongCatAvatarWhisperEmbeds`, with no
+hardcoded "force scale=1.0 when distilled" the way the plain script has.
+
+Built a full 16-node API-format ComfyUI workflow by hand (no reference
+example exists for this exact Whisper-based v1.5 audio path — the only
+bundled example workflow uses the older wav2vec2/v1.0 path), validated
+every node's inputs against a live pod's `/object_info` before spending any
+GPU time, and got it executing. Hit and fixed one genuine upstream bug
+(`WanVideoLongCatAvatarExtendEmbeds`: `latent_overlap` referenced outside
+the `if overlap != 0` block that defines it, crashing whenever `overlap=0`
+is combined with a real `ref_latent` — worked around by omitting
+`ref_latent` for the first segment, which is also the semantically correct
+usage per the node's own tooltip).
+
+That fix exposed the real, unfixable blocker: a dimension mismatch inside
+the model's own `multitalk_audio_proj` (`mat1 and mat2 shapes cannot be
+multiplied (1x32000 and 46080x512)`). Root-caused by inspecting the actual
+checkpoint's safetensors header directly over HTTP range requests (no need
+to download the 30GB+ file): `Kijai/LongCat-Video_comfy`'s
+`Avatar/LongCat-Avatar_comfy_bf16.safetensors` has
+`multitalk_audio_proj.proj1.weight` shape `[512, 46080]` —
+`5 (seq_len) * 12 (blocks) * 768 (channels)`, i.e. the **v1.0 (wav2vec2)**
+audio architecture, not v1.5/Whisper's `5 * 5 * 1280 = 32000`. **No
+ComfyUI-format conversion of the official
+`meituan-longcat/LongCat-Video-Avatar-1.5` checkpoint exists publicly** —
+confirmed both by listing every file in Kijai's HF repo (only the v1.0
+Avatar checkpoint is there) and by an open, unanswered upstream GitHub
+issue (`kijai/ComfyUI-WanVideoWrapper#2026`, filed 2026-07-01) from another
+user hitting this exact wall with `LongCatAvatarWhisperEmbeds`. This is a
+missing piece in the upstream ecosystem, not a mistake in our workflow —
+every node schema validated correctly, and the pipeline ran cleanly right
+up to this checkpoint/audio-path mismatch.
+
+Given the checkpoint blocker, pivoted to testing the actual underlying
+hypothesis — "does real guidance scale work under the fast distilled
+schedule" — directly against the **official** pipeline instead of a
+third-party reimplementation. Read `pipeline_longcat_video_avatar.py`
+directly: `do_classifier_free_guidance` is purely `scale > 1.0`, and
+`get_timesteps_sigmas()` uses `use_distill` only to pick the 8-step DMD
+noise schedule — the two are independent in the actual sampling code, the
+demo script's forced override above is *its own* choice, not a real
+constraint. Patched out just the two override lines (kept
+`num_inference_steps = 8`) and live-tested on a real pod at the upstream
+defaults (`text_guidance_scale=4.0`, `audio_guidance_scale=4.0`): the
+8-step denoising loop completed cleanly (no crash, no NaN) but produced
+**badly distorted output** — exaggerated, "rubbery" facial geometry,
+warped nose/forehead, twitchy motion — visually confirmed by direct review
+of the rendered video.
+
+This is the **second independent negative result at `guidance_scale=4.0`**
+on this checkpoint (the first being `--no-distill`'s full 50-step run,
+documented above, also reported as poor quality) — both under different
+step counts and different code paths, with only the guidance value in
+common. This points to `guidance_scale` significantly above `1.0` being
+poorly suited to this specific fine-tuned avatar checkpoint in general,
+not a distillation-specific artifact and not an implementation bug — which
+also means the ComfyUI path's core value proposition (real guidance under
+distillation) would very likely have hit the same wall even with a working
+v1.5 checkpoint.
+
+**Decision: stay on the original A/B-winning default** (`--use_distill`,
+implicit `guidance_scale=1.0`) as the only validated-good configuration.
+Do not pursue `--no-distill`, custom guidance scales, or the ComfyUI
+backend as quality levers going forward — two independent live-pod
+experiments now agree. The guidance-scale patch and the
+`docker/longcat-avatar-comfyui` exploration are not merged into this
+script; `docker/longcat-avatar-comfyui/` and
+`scripts/download_weights_longcat_comfyui.sh` remain on the unmerged
+`feature/longcat-comfyui-backend` branch as a record of the investigation,
+not as active code paths. Remaining real levers for influencing output,
+untested so far: the text prompt itself (still has effect at
+`guidance_scale=1.0` — a single conditional forward pass, no CFG
+extrapolation needed for it to matter) and the driving audio's own
+prosody/pacing/emotion (loudness gets normalized away per the
+`--audio-gain-db` finding above, but pitch/timing variation in the source
+recording is not obviously normalized the same way).
 
 ### Resilient remote render: survive local network drops (2026-07-26)
 
@@ -275,3 +365,16 @@ backstop, same as before.
   `PodSession` code so far.
 - Public/hosted colleague interface (Telegram bot or web app, with real
   per-user auth) — future phase, not started.
+- Observed once (2026-07-26, during the guidance-scale test above): a
+  final `ffmpeg` crop step hung indefinitely mid-`close()` on the network
+  volume (`wchan: request_wait_answer` — blocked on the FUSE backend), with
+  the GPU sitting idle at 0% util the whole time. Metadata (`ls`) reported
+  the output file at its correct final size while actual reads of it
+  returned empty/truncated data — an eventual-consistency gap between the
+  FUSE mount's metadata and data layers. Worked around manually that once
+  (used an earlier, already-fully-flushed intermediate file instead, and
+  muxed audio+video locally). Not yet turned into a code fix — no retry/
+  timeout guards against a stuck writer on `/workspace` exist anywhere in
+  `generate_avatar_video.py`'s render/download path. If this recurs, it's
+  a real gap in the "recoverability" design (see "Resilient remote render"
+  above), just at the filesystem layer instead of the SSH layer.
