@@ -365,6 +365,33 @@ backstop, same as before.
   `PodSession` code so far.
 - Public/hosted colleague interface (Telegram bot or web app, with real
   per-user auth) — future phase, not started.
+- **Closing-smile artifact at the end of the final segment (2026-07-26).**
+  Even with a prompt explicitly asking for restrained articulation, a
+  4-segment test render still showed a slight smile creeping in near the
+  very end. Ruled out audio-embedding silence-padding as the cause (the
+  existing per-segment ffmpeg crop in `save_video_ffmpeg` already caps
+  output to the real audio's duration within ~0.2s — checked by reading
+  the actual crop logic, not just the padding-computation code). Confirmed
+  via direct frame extraction instead: the same slight smile is visible at
+  segment 3's internal boundary (10.12s cumulative) as well as the final
+  frame (12.0s) — invisible at segments 1 and 2's boundaries only because
+  the person happened to be mid-articulation exactly there. This points to
+  a real, recurring model behavior: the distilled sampler tends toward a
+  slight "closing" expression at the end of each generated ~93-frame
+  chunk, normally invisible because the next segment's real audio-driven
+  motion overwrites it before the final crop — visible only in the true
+  last segment, since nothing continues past it.
+
+  Added `run_longcat_avatar.sh --end-trim-s` to chop a fixed duration off
+  the very end as a mitigation. **First attempt defaulted it to 1.2s and
+  that was wrong** — live-tested immediately after and it cut into genuine
+  trailing speech, not just the artifact: the smile's onset and the
+  driving audio's real content can overlap in time on a given clip, so no
+  single fixed value is safe by default across all clips. Reverted the
+  default to `0` (off); the flag remains available for deliberate, opt-in
+  use once someone has watched the untrimmed render and can see real
+  silence at the end to spare. No general, always-safe fix identified yet
+  — a real content-vs-artifact trade-off, not a solved problem.
 - Observed once (2026-07-26, during the guidance-scale test above): a
   final `ffmpeg` crop step hung indefinitely mid-`close()` on the network
   volume (`wchan: request_wait_answer` — blocked on the FUSE backend), with
