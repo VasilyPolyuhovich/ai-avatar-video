@@ -43,8 +43,10 @@ session = PodSession(idle_timeout_s=IDLE_TIMEOUT_S)
 
 def handle_submit(image, audio, prompt, resolution, no_distill, end_trim_s):
     if not image or not audio:
-        yield None, "Please provide both a photo and an audio clip."
+        yield None, "Please provide both a photo and an audio clip.", gr.update()
         return
+
+    yield None, "Starting ...", gr.update(interactive=False)
 
     q: "queue.Queue" = queue.Queue()
     box = {}
@@ -70,17 +72,17 @@ def handle_submit(image, audio, prompt, resolution, no_distill, end_trim_s):
         if line is None:
             break
         log_lines.append(line)
-        yield None, "\n".join(log_lines[-MAX_LOG_LINES:])
+        yield None, "\n".join(log_lines[-MAX_LOG_LINES:]), gr.update()
 
     if "error" in box:
-        yield None, "\n".join(log_lines) + f"\n\nFAILED: {box['error']}"
+        yield None, "\n".join(log_lines) + f"\n\nFAILED: {box['error']}", gr.update(interactive=True)
         return
 
     local_path, _job_id, elapsed_s = box["result"]
     summary = (f"\n\nThis render: {elapsed_s / 60:.1f} min. "
                f"Session so far: ~${session.session_cost_so_far():.2f} "
                f"({session.gpu_id} @ ${session.gpu_price}/hr).")
-    yield local_path, "\n".join(log_lines) + summary
+    yield local_path, "\n".join(log_lines) + summary, gr.update(interactive=True)
 
 
 def handle_stop():
@@ -92,10 +94,10 @@ def handle_stop():
 
 def pod_status_text():
     if session.pod_id is None:
-        return "**Session pod:** none"
-    return (f"**Session pod:** `{session.pod_id}` running {session.gpu_id} "
-            f"@ ${session.gpu_price}/hr — session so far: "
-            f"~${session.session_cost_so_far():.2f}")
+        return "⬛ **No active pod** -- the first click below will deploy one (~10-16 min)."
+    return (f"\U0001f7e2 **Pod running:** `{session.pod_id}` ({session.gpu_id} @ "
+            f"${session.gpu_price}/hr) -- session cost so far: "
+            f"**~${session.session_cost_so_far():.2f}**")
 
 
 EXAMPLE_PROMPTS = [
@@ -107,56 +109,89 @@ EXAMPLE_PROMPTS = [
      "conversational delivery, looking directly at the camera."],
 ]
 
-with gr.Blocks(title="AI Avatar Video") as demo:
+CSS = """
+.section-card { border: 1px solid var(--border-color-primary); border-radius: 12px;
+                padding: 14px 16px; margin-bottom: 10px; background: var(--background-fill-secondary); }
+.status-card { border-radius: 10px; padding: 10px 14px; background: var(--background-fill-secondary);
+               border: 1px solid var(--border-color-primary); }
+#generate-btn { min-height: 46px; font-size: 1.05em; }
+"""
+
+with gr.Blocks(title="AI Avatar Video", theme=gr.themes.Soft(primary_hue="blue"), css=CSS) as demo:
+    gr.Markdown("# \U0001f3ac AI Avatar Video")
     gr.Markdown(
-        "# AI Avatar Video\n"
-        "Upload a reference photo and a driving audio clip, add a prompt to shape tone and "
-        "expression, and generate a lip-synced talking-head video. The first click deploys "
-        "a GPU pod (~10-16 min); later clicks in the same session reuse it "
-        "and are much faster. Click **Stop pod** when done, or it "
-        f"auto-terminates after {IDLE_TIMEOUT_S // 60} min idle -- see "
-        "`docs/generate-video.md` for setup and cost details."
+        "Turn a photo + audio clip into a lip-synced talking-head video. "
+        "Runs on a shared RunPod GPU account -- this page only runs on your own machine."
     )
-    status_md = gr.Markdown(pod_status_text())
+
+    with gr.Accordion("ℹ️ How this works & cost (click to expand)", open=False):
+        gr.Markdown(
+            "- **First click** on a fresh session deploys a GPU pod and takes **~10-16 min** "
+            "(pod boot + a one-time model warmup). **Later clicks reuse the same pod** and are "
+            "much faster (typically a few minutes).\n"
+            "- **Cost**: shared account, an A100 80GB runs **~$1.40-1.50/hr**. A typical render "
+            "is roughly **$0.25-0.40**. Trust the live session-cost figure below over any per-video "
+            "estimate -- idle time between clicks bills too.\n"
+            f"- The pod **auto-terminates after {IDLE_TIMEOUT_S // 60} min idle**, or immediately on "
+            "**Stop pod**, or on any render error. Click **Stop pod** when you're done to be sure.\n"
+            "- One-time machine setup (credentials, SSH key, Python deps) is **not** covered here -- "
+            "see `docs/generate-video.md` in the repo if you're setting up a new machine.\n"
+            "- Full technical background: `docs/decisions.md` (what's proven to work and why) and "
+            "`docs/prompt-guide.md` (how to write a prompt that actually helps)."
+        )
+
+    status_md = gr.Markdown(pod_status_text(), elem_classes=["status-card"])
+
     with gr.Row():
-        with gr.Column():
-            image_in = gr.Image(type="filepath", label="Reference photo")
-            audio_in = gr.Audio(type="filepath", label="Driving audio")
-            prompt_in = gr.Textbox(
-                label="Prompt",
-                lines=3,
-                value=EXAMPLE_PROMPTS[0][0],
-                info="Fully controls tone, demeanor, and how restrained or expressive the face "
-                     "looks -- it's not a decoration, it has a real, direct effect. See the "
-                     "example prompts below or docs/prompt-guide.md for what works.")
-            with gr.Accordion("Example prompts (click to use)", open=False):
-                gr.Examples(examples=EXAMPLE_PROMPTS, inputs=[prompt_in], label=None)
-            resolution_in = gr.Radio(["480p", "720p"], value="480p", label="Resolution")
-            with gr.Accordion("Advanced (rarely needed)", open=False):
-                end_trim_in = gr.Number(
-                    label="End trim (seconds)", value=0, minimum=0,
-                    info="The model tends to add a slight 'closing smile' at the very end of "
-                         "the last segment. This crops that many seconds off the end -- but "
-                         "only turn it on AFTER watching the untrimmed result once, since the "
-                         "same crop can cut real trailing speech on a different clip. 0 = off.")
-                no_distill_in = gr.Checkbox(
-                    label="Full 50-step sampler (--no-distill)",
-                    value=False,
-                    info="NOT RECOMMENDED: confirmed to distort facial geometry on this "
-                         "checkpoint, and ~17x slower per segment. Kept only as an escape "
-                         "hatch for experimentation -- use the prompt above to control "
-                         "expression instead, it's the lever that actually works safely.")
+        with gr.Column(scale=1):
+            with gr.Group(elem_classes=["section-card"]):
+                gr.Markdown("### 1. Inputs")
+                image_in = gr.Image(type="filepath", label="Reference photo")
+                audio_in = gr.Audio(type="filepath", label="Driving audio")
+
+            with gr.Group(elem_classes=["section-card"]):
+                gr.Markdown("### 2. Prompt")
+                prompt_in = gr.Textbox(
+                    label="Prompt",
+                    lines=3,
+                    value=EXAMPLE_PROMPTS[0][0],
+                    info="This has a real, direct effect on tone and expression -- it's not "
+                         "decoration. Keep it to ONE consistent idea (e.g. \"calm and restrained\"); "
+                         "mixing contradictory traits in one sentence (\"ironic but relaxed\") tends "
+                         "to confuse the model into erratic mouth movement. See docs/prompt-guide.md.")
+                with gr.Accordion("Example prompts (click one to use it)", open=False):
+                    gr.Examples(examples=EXAMPLE_PROMPTS, inputs=[prompt_in])
+
+            with gr.Group(elem_classes=["section-card"]):
+                gr.Markdown("### 3. Options")
+                resolution_in = gr.Radio(["480p", "720p"], value="480p", label="Resolution")
+                with gr.Accordion("Advanced (rarely needed)", open=False):
+                    end_trim_in = gr.Number(
+                        label="End trim (seconds)", value=0, minimum=0,
+                        info="The model tends to add a slight 'closing smile' at the very end of "
+                             "the last segment. This crops that many seconds off the end -- but "
+                             "only turn it on AFTER watching the untrimmed result once, since the "
+                             "same crop can cut real trailing speech on a different clip. 0 = off.")
+                    no_distill_in = gr.Checkbox(
+                        label="Full 50-step sampler (--no-distill)",
+                        value=False,
+                        info="NOT RECOMMENDED: confirmed to distort facial geometry on this "
+                             "checkpoint, and ~17x slower per segment. Kept only as an escape "
+                             "hatch for experimentation -- use the prompt above to control "
+                             "expression instead, it's the lever that actually works safely.")
+
             with gr.Row():
-                submit_btn = gr.Button("Generate", variant="primary")
-                stop_btn = gr.Button("Stop pod")
-        with gr.Column():
+                submit_btn = gr.Button("▶️  Generate", variant="primary", elem_id="generate-btn")
+                stop_btn = gr.Button("⏹️  Stop pod")
+
+        with gr.Column(scale=1):
             video_out = gr.Video(label="Result")
             status_out = gr.Textbox(label="Status / progress", lines=18, interactive=False)
 
     submit_btn.click(
         handle_submit,
         inputs=[image_in, audio_in, prompt_in, resolution_in, no_distill_in, end_trim_in],
-        outputs=[video_out, status_out],
+        outputs=[video_out, status_out, submit_btn],
     )
     stop_btn.click(handle_stop, outputs=status_out)
 
@@ -195,4 +230,15 @@ if __name__ == "__main__":
     # demo.queue() is required: without it, a generator-returning event
     # handler's yields all buffer and the browser only sees the final
     # state -- for a ~10-16 min job that reads as a frozen/broken UI.
-    demo.queue().launch(server_name="127.0.0.1")
+    #
+    # server_name defaults to 127.0.0.1 (localhost only). For remote access
+    # over an existing Tailscale tailnet, prefer `tailscale serve --bg
+    # http://localhost:7860` over changing this -- it keeps this process on
+    # the safe localhost-only default and gets a proper HTTPS .ts.net URL
+    # from Tailscale's own proxy. Only set BIND_ALL=1 (binds 0.0.0.0) if
+    # `tailscale serve` isn't available on your tailnet yet -- reachability
+    # is still tailnet-only either way (Tailscale's own network-level ACLs
+    # gate who can even route to this machine's tailnet IP), you just lose
+    # the HTTPS wrapper and the clean hostname. See docs/generate-video.md.
+    bind_all = (pod_up.env("BIND_ALL", "0") or "0") == "1"
+    demo.queue().launch(server_name="0.0.0.0" if bind_all else "127.0.0.1")

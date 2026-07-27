@@ -60,6 +60,16 @@ Options:
                              Roughly 17x longer render per segment, not just
                              the 6x the step-count ratio alone would suggest
                              -- see the note below.
+  --ref-img-index N         Upstream default: 10. Per the official README's
+                             "User tips": values 0-24 favor consistency;
+                             30 is suggested to help reduce "repeated
+                             actions" (identity/expression drift across
+                             segments) -- untested by this project so far,
+                             does not touch guidance/CFG at all.
+  --mask-frame-range N      Upstream default: 3. Per the official README:
+                             increasing this can further help mitigate
+                             repeated actions, but excessively large values
+                             may introduce artifacts of their own.
 EOF
   exit 1
 }
@@ -91,6 +101,8 @@ NUM_SEGMENTS=""
 OUTPUT_DIR="./outputs_avatar_single"
 DISTILL_FLAG="--use_distill"
 END_TRIM_S="0"
+REF_IMG_INDEX=""
+MASK_FRAME_RANGE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -102,6 +114,8 @@ while [[ $# -gt 0 ]]; do
     --num-segments) NUM_SEGMENTS="$2"; shift 2 ;;
     --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
     --end-trim-s) END_TRIM_S="$2"; shift 2 ;;
+    --ref-img-index) REF_IMG_INDEX="$2"; shift 2 ;;
+    --mask-frame-range) MASK_FRAME_RANGE="$2"; shift 2 ;;
     --no-distill) DISTILL_FLAG=""; shift ;;
     -h|--help) usage ;;
     *) echo "Unknown arg: $1" >&2; usage ;;
@@ -148,6 +162,10 @@ else
   echo "Final output will be: $OUTPUT_DIR/video_continue_${NUM_SEGMENTS}.mp4 (the upstream script names each intermediate segment video_continue_N.mp4 -- only the highest N is the complete video)" >&2
 fi
 
+REF_ARGS=()
+[[ -n "$REF_IMG_INDEX" ]] && REF_ARGS+=(--ref_img_index "$REF_IMG_INDEX")
+[[ -n "$MASK_FRAME_RANGE" ]] && REF_ARGS+=(--mask_frame_range "$MASK_FRAME_RANGE")
+
 cd /opt/LongCat-Video
 torchrun --nproc_per_node=1 run_demo_avatar_single_audio_to_video.py \
   --checkpoint_dir="$CHECKPOINT_DIR" \
@@ -155,6 +173,7 @@ torchrun --nproc_per_node=1 run_demo_avatar_single_audio_to_video.py \
   --num_segments="$NUM_SEGMENTS" \
   --input_json="$INPUT_JSON" \
   $DISTILL_FLAG \
+  "${REF_ARGS[@]}" \
   --model_type avatar-v1.5 \
   --resolution "$RESOLUTION" \
   --output_dir "$OUTPUT_DIR"

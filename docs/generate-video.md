@@ -109,23 +109,26 @@ Useful flags:
   spending anything.
 - `--json` — print the result as one JSON line instead of a summary
   sentence (useful for scripting).
-- `--no-distill` — disable the 8-step distilled sampler and run the full
-  50-step one instead. **This is the only way `--prompt` (and guidance
-  scale generally) actually affects the output** — the distilled mode this
-  tool uses by default forces both text and audio guidance to their
-  minimum regardless of what you ask for, which is also why articulation
-  can look exaggerated with the default settings. **Costs roughly 17x the
-  usual render time/cost per segment** (not just the ~6x the step-count
-  ratio alone would suggest — a non-distilled step is also individually
-  ~2.7x slower, confirmed live: ~38.5s/step vs ~14.5s/step, since full
-  guidance runs two forward passes per step instead of one). `--timeout`
-  auto-scales to 3 hours for `--no-distill` runs for exactly this reason —
-  don't override it downward unless you know your audio is short.
-- `--audio-gain-db -6` (or similar) — apply a volume reduction to a local
-  copy of your audio before upload. Quieter, flatter delivery tends to
-  produce less exaggerated mouth articulation, since the model's motion
-  signal correlates with the driving audio's energy. Free to try (no extra
-  GPU time), worth experimenting with before reaching for `--no-distill`.
+- `--prompt` — the real, working lever for tone and expression. It fully
+  drives the model at this tool's default settings (not weakened or
+  ignored) — see `docs/prompt-guide.md` for what works and what doesn't
+  (short version: one consistent idea per prompt, avoid contradictory
+  traits like "ironic but relaxed" in the same sentence — that confuses
+  the model into erratic mouth movement, confirmed live).
+- `--end-trim-s N` — crops N seconds off the very end of the final output.
+  Opt-in mitigation for a confirmed model quirk (a slight "closing smile"
+  at the end of the last segment) — **do not set a default value blindly**,
+  preview the untrimmed render first. The artifact's onset can overlap
+  with genuine trailing speech, so a value safe for one clip can cut real
+  words on another (confirmed live 2026-07-26).
+- `--no-distill` and `--audio-gain-db` still exist for backward
+  compatibility but are **not recommended**: `--no-distill` (full 50-step
+  sampler, ~17x slower per segment) is confirmed to distort facial
+  geometry on this checkpoint regardless of step count, and
+  `--audio-gain-db` is a confirmed no-op — LongCat normalizes the driving
+  audio's loudness unconditionally before encoding, so the value never
+  reaches the model. See `docs/decisions.md#2-generation-stack` for both
+  findings.
 
 ### Option 2: local web UI (Gradio)
 
@@ -135,9 +138,61 @@ python3 scripts/app_gradio.py
 ```
 
 Open `http://127.0.0.1:7860` in your browser. Upload a photo and an audio
-clip, optionally type a prompt, choose a resolution, click **Generate**.
-An **Advanced** section has the same `--no-distill`/audio-gain controls as
-the CLI. This only runs on your own machine — nobody else can reach it.
+clip, type a prompt (see the built-in examples or `docs/prompt-guide.md`),
+choose a resolution, click **Generate**. An **Advanced** section has the
+same end-trim/`--no-distill` controls as the CLI, clearly marked with
+which ones are actually recommended. By default this only runs on your own
+machine — nobody else can reach it (see "Remote access" below to change
+that deliberately).
+
+#### Remote access over Tailscale (optional)
+
+If colleagues need to reach your running UI without doing their own local
+setup, and you already have [Tailscale](https://tailscale.com) set up:
+
+```bash
+tailscale serve --bg http://localhost:7860
+```
+
+This proxies the app (still bound to `127.0.0.1` — nothing about the
+Python process changes) to a stable `https://<your-device>.<tailnet>.ts.net`
+URL, reachable only by devices on your tailnet. `tailscale serve status`
+shows the current mapping; `tailscale serve --bg off` (or the equivalent
+in a newer CLI version) removes it. This needs the "Serve" feature enabled
+on your tailnet first — if `tailscale serve --bg ...` replies "Serve is
+not enabled on your tailnet," it'll print a `https://login.tailscale.com/f/serve?node=...`
+link to enable it (one-time, needs your Tailscale account login).
+
+**If `tailscale serve` isn't available yet**, run with `BIND_ALL=1`
+instead:
+
+```bash
+BIND_ALL=1 python3 scripts/app_gradio.py
+```
+
+This binds the Gradio process directly to `0.0.0.0`, reachable at
+`http://<your-tailscale-ip>:7860` (find your IP with `tailscale status`).
+Reachability is still tailnet-only — Tailscale's own network-level ACLs
+gate who can route to that IP at all, regardless of this flag — you just
+lose `serve`'s automatic HTTPS and the clean `.ts.net` hostname. Prefer
+`tailscale serve` once it's enabled; use `BIND_ALL=1` only as a stopgap.
+
+Two things this does **not** change, either way:
+- **The UI is only reachable while your own machine is on, awake, and
+  running `app_gradio.py`** — unlike the GPU render pods (cloud-hosted,
+  independent of any laptop), this process lives on whoever's machine
+  started it. If that's not enough later (need access independent of one
+  specific laptop being on), the same `tailscale serve` setup running on a
+  small always-on machine on the same tailnet would do it — not set up
+  today.
+- **One shared session, not per-colleague.** The pod-management session
+  (`PodSession`) has no per-user concept — if someone clicks Generate
+  while another render is already in progress, they get a clear
+  "a render is already in progress on this session" error, not a queued
+  job or a second pod. Fine for colleagues taking turns; genuinely
+  simultaneous multi-user rendering isn't supported today (would need a
+  render queue or a session per user, each spinning up its own pod at
+  proportionally higher GPU cost).
 
 **Unlike the CLI, the UI keeps one pod alive across a session** instead of
 redeploying for every click — the first Generate pays the usual ~10-16 min
@@ -208,11 +263,14 @@ If you're about to generate a large batch, check balance first.
   you ever end up running pieces of this by hand over SSH, read
   [`decisions.md`](decisions.md#2-generation-stack--ab-decided-2026-07-25-longcat-video-avatar-15-wins)
   first.
-- **Articulation/mimicry looks exaggerated, or the prompt seems to do
-  nothing** — expected in the default distilled mode (see `--no-distill`
-  above); try `--audio-gain-db` first (free), then `--no-distill` (~17x
-  render cost per segment — budget time/money accordingly) if that's not
-  enough.
+- **Articulation/mimicry looks exaggerated** — the prompt IS working and
+  does have real effect; rewrite it to explicitly ask for restrained
+  articulation (see `docs/prompt-guide.md`'s worked example) rather than
+  reaching for `--no-distill` or `--audio-gain-db` — both are confirmed to
+  either not help or actively make things worse (see `decisions.md`).
+  Keep the prompt to one consistent idea; mixing contradictory traits in
+  one sentence tends to produce erratic, unstable mouth movement instead
+  of a compromise between them.
 - **A `--no-distill` run failed with "remote command exceeded ...s"** — the
   render was very likely progressing fine, just slower than the timeout
   budget. `--timeout` auto-scales to 10800s (3 hours) for `--no-distill`
