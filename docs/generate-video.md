@@ -141,8 +141,58 @@ Open `http://127.0.0.1:7860` in your browser. Upload a photo and an audio
 clip, type a prompt (see the built-in examples or `docs/prompt-guide.md`),
 choose a resolution, click **Generate**. An **Advanced** section has the
 same end-trim/`--no-distill` controls as the CLI, clearly marked with
-which ones are actually recommended. This only runs on your own machine —
-nobody else can reach it.
+which ones are actually recommended. By default this only runs on your own
+machine — nobody else can reach it (see "Remote access" below to change
+that deliberately).
+
+#### Remote access over Tailscale (optional)
+
+If colleagues need to reach your running UI without doing their own local
+setup, and you already have [Tailscale](https://tailscale.com) set up:
+
+```bash
+tailscale serve --bg http://localhost:7860
+```
+
+This proxies the app (still bound to `127.0.0.1` — nothing about the
+Python process changes) to a stable `https://<your-device>.<tailnet>.ts.net`
+URL, reachable only by devices on your tailnet. `tailscale serve status`
+shows the current mapping; `tailscale serve --bg off` (or the equivalent
+in a newer CLI version) removes it. This needs the "Serve" feature enabled
+on your tailnet first — if `tailscale serve --bg ...` replies "Serve is
+not enabled on your tailnet," it'll print a `https://login.tailscale.com/f/serve?node=...`
+link to enable it (one-time, needs your Tailscale account login).
+
+**If `tailscale serve` isn't available yet**, run with `BIND_ALL=1`
+instead:
+
+```bash
+BIND_ALL=1 python3 scripts/app_gradio.py
+```
+
+This binds the Gradio process directly to `0.0.0.0`, reachable at
+`http://<your-tailscale-ip>:7860` (find your IP with `tailscale status`).
+Reachability is still tailnet-only — Tailscale's own network-level ACLs
+gate who can route to that IP at all, regardless of this flag — you just
+lose `serve`'s automatic HTTPS and the clean `.ts.net` hostname. Prefer
+`tailscale serve` once it's enabled; use `BIND_ALL=1` only as a stopgap.
+
+Two things this does **not** change, either way:
+- **The UI is only reachable while your own machine is on, awake, and
+  running `app_gradio.py`** — unlike the GPU render pods (cloud-hosted,
+  independent of any laptop), this process lives on whoever's machine
+  started it. If that's not enough later (need access independent of one
+  specific laptop being on), the same `tailscale serve` setup running on a
+  small always-on machine on the same tailnet would do it — not set up
+  today.
+- **One shared session, not per-colleague.** The pod-management session
+  (`PodSession`) has no per-user concept — if someone clicks Generate
+  while another render is already in progress, they get a clear
+  "a render is already in progress on this session" error, not a queued
+  job or a second pod. Fine for colleagues taking turns; genuinely
+  simultaneous multi-user rendering isn't supported today (would need a
+  render queue or a session per user, each spinning up its own pod at
+  proportionally higher GPU cost).
 
 **Unlike the CLI, the UI keeps one pod alive across a session** instead of
 redeploying for every click — the first Generate pays the usual ~10-16 min

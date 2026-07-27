@@ -230,4 +230,15 @@ if __name__ == "__main__":
     # demo.queue() is required: without it, a generator-returning event
     # handler's yields all buffer and the browser only sees the final
     # state -- for a ~10-16 min job that reads as a frozen/broken UI.
-    demo.queue().launch(server_name="127.0.0.1")
+    #
+    # server_name defaults to 127.0.0.1 (localhost only). For remote access
+    # over an existing Tailscale tailnet, prefer `tailscale serve --bg
+    # http://localhost:7860` over changing this -- it keeps this process on
+    # the safe localhost-only default and gets a proper HTTPS .ts.net URL
+    # from Tailscale's own proxy. Only set BIND_ALL=1 (binds 0.0.0.0) if
+    # `tailscale serve` isn't available on your tailnet yet -- reachability
+    # is still tailnet-only either way (Tailscale's own network-level ACLs
+    # gate who can even route to this machine's tailnet IP), you just lose
+    # the HTTPS wrapper and the clean hostname. See docs/generate-video.md.
+    bind_all = (pod_up.env("BIND_ALL", "0") or "0") == "1"
+    demo.queue().launch(server_name="0.0.0.0" if bind_all else "127.0.0.1")
