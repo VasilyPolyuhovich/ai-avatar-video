@@ -298,7 +298,7 @@ def deploy_pod(account_key, public_key, job_id, min_vram, max_price, gpu_match,
     # that; each run is fully independent.
     cfg = {
         "image": image_ref,
-        "pod_name": f"ai-avatar-video-{job_id}",
+        "pod_name": f"{pod_up.POD_NAME_PREFIX}-{job_id}",
         "container_disk": 60,
         "ports": "22/tcp",  # LongCat has no HTTP server, unlike InfiniteTalk/ComfyUI
         "registry_auth_id": pod_up.DEFAULT_REGISTRY_AUTH_ID,
@@ -556,19 +556,31 @@ class PodSession:
             self.account_key, self.public_key, self._session_id,
             self.min_vram, self.max_price, self.gpu_match,
             self.network_volume_id, self.image_ref, self.start_timeout, log)
+        # self.pod_id/gpu_id/gpu_price are set HERE, as soon as the pod
+        # exists -- not after wait_for_ssh() below (which can take several
+        # more minutes). A foreign-pod check (app_gradio.py's
+        # _find_foreign_pod / pre_deploy_check) reads session.pod_id to
+        # exclude "this session's own pod" -- leaving it None during the
+        # whole SSH-boot window used to make this session's own
+        # just-deployed pod look "foreign" to itself (and to periodic
+        # polls) for that entire window. Safe to set early: ensure_ready()
+        # has exactly one caller (render(), itself serialized by
+        # self._busy), so no concurrent second call can observe pod_id set
+        # while ip/port are still None.
+        with self._lock:
+            self.pod_id, self.gpu_id, self.gpu_price = pod_id, gpu_id, gpu_price
+            self._session_started_at = time.monotonic()  # billing starts at pod creation, not SSH-ready
         try:
             ip, port = wait_for_ssh(self.account_key, pod_id, self.key_path,
                                      self.ssh_endpoint_timeout, self.ssh_ready_timeout, log)
         except Exception:
-            # Instance state was never touched -- nothing to clean up but
-            # the pod itself. Stateless call, no lock needed.
+            with self._lock:
+                self.pod_id = self.gpu_id = self.gpu_price = self._session_started_at = None
             _safe_terminate(self.account_key, pod_id, log)
             raise
 
         with self._lock:
-            self.pod_id, self.ip, self.port = pod_id, ip, port
-            self.gpu_id, self.gpu_price = gpu_id, gpu_price
-            self._session_started_at = time.monotonic()
+            self.ip, self.port = ip, port
             self._last_activity = time.monotonic()
             if self._watchdog_thread is None or not self._watchdog_thread.is_alive():
                 self._watchdog_stop.clear()
@@ -619,16 +631,34 @@ class PodSession:
             return 0.0
         return self.gpu_price * (time.monotonic() - self._session_started_at) / 3600
 
+    def snapshot_cost_info(self):
+        """Atomically read (gpu_id, gpu_price, session_cost_so_far()) under
+        self._lock -- for callers building a display string right after
+        render() returns, to avoid racing a concurrent terminate() (e.g. a
+        Stop-pod click) that clears gpu_id/gpu_price mid-read."""
+        with self._lock:
+            return self.gpu_id, self.gpu_price, self.session_cost_so_far()
+
     def terminate(self, status_cb=None):
         with self._lock:
-            self._terminate_locked(status_cb)
+            pod_id, account_key = self._terminate_locked()
+        if pod_id is not None:
+            log, _ = _make_loggers(status_cb)
+            _safe_terminate(account_key, pod_id, log)  # billing-critical --
+            # deliberately OUTSIDE self._lock, see _terminate_locked's docstring.
 
-    def _terminate_locked(self, status_cb=None):
+    def _terminate_locked(self):
         """Caller must already hold self._lock; must never acquire it
-        itself (the watchdog calls this directly from inside its own lock)."""
-        log, _ = _make_loggers(status_cb)
-        if self.pod_id is not None:
-            _safe_terminate(self.account_key, self.pod_id, log)  # billing-critical: first
+        itself (the watchdog calls this directly from inside its own lock).
+        Only clears local state and stops the watchdog thread -- does NOT
+        call _safe_terminate()/status_cb itself. That's left to the caller,
+        to run AFTER releasing self._lock: _safe_terminate is stateless (see
+        its own docstring), and its log() calls invoke status_cb, which in
+        the web UI (app_gradio.py) acquires RenderState._lock -- doing that
+        while still holding self._lock would nest the two locks, exactly
+        the hazard RenderState's own docstring says never happens. Returns
+        (pod_id, account_key) to terminate, or (None, None) if no pod was up."""
+        pod_id, account_key = self.pod_id, self.account_key
         if self._watchdog_thread is not None:
             self._watchdog_stop.set()
             # A thread can't join itself (RuntimeError) -- the watchdog's
@@ -638,6 +668,7 @@ class PodSession:
                 self._watchdog_thread.join(timeout=5)
             self._watchdog_thread = None
         self.pod_id = self.ip = self.port = self.gpu_id = self.gpu_price = None
+        return pod_id, account_key
 
     def _watchdog_loop(self):
         while not self._watchdog_stop.wait(30):
@@ -646,10 +677,11 @@ class PodSession:
                     continue
                 if time.monotonic() - self._last_activity <= self.idle_timeout_s:
                     continue
-                log, _ = _make_loggers(None)  # no request's status_cb is live here
-                log(f"idle for over {self.idle_timeout_s}s -- auto-terminating "
-                    f"session pod {self.pod_id}")
-                self._terminate_locked()
+                print(f"[generate] idle for over {self.idle_timeout_s}s -- "
+                      f"auto-terminating session pod {self.pod_id}")
+                pod_id, account_key = self._terminate_locked()
+            if pod_id is not None:
+                _safe_terminate(account_key, pod_id, _make_loggers(None)[0])
             return
 
 
@@ -662,12 +694,18 @@ def generate_avatar_video(
     network_volume_id=pod_up.DEFAULT_NETWORK_VOLUME_ID,
     image_ref=DEFAULT_IMAGE_REF,
     start_timeout=600, ssh_endpoint_timeout=120, ssh_ready_timeout=180,
-    run_timeout_s=None, dry_run=False, status_cb=None,
+    run_timeout_s=None, dry_run=False, pre_deploy_check=None, status_cb=None,
 ):
     """Deploy a fresh LongCat pod, render image+audio+prompt into a video,
     retrieve it, and terminate the pod -- always, even on error/Ctrl-C.
     Returns a GenerationResult, or None if dry_run=True. One pod per call --
     see PodSession above if you want to reuse a pod across several renders.
+
+    pre_deploy_check: optional zero-arg callable, called right before the
+    real deploy_pod() call below (mirrors PodSession.ensure_ready()'s hook
+    of the same name) -- e.g. pod_up.make_foreign_pod_check(), so this
+    standalone one-shot CLI path also gets the foreign-pod safety check,
+    not just the PodSession-based web UI.
     """
     log, remote_log = _make_loggers(status_cb)
 
@@ -689,6 +727,9 @@ def generate_avatar_video(
             log(f"  {g['id']:<42} {g['vram']:>4}G  ${g['price']:<6} stock={g['stock']}")
         log(f"would run: {build_remote_cmd(paths, prompt, resolution, num_segments, no_distill=no_distill, end_trim_s=end_trim_s)}")
         return None
+
+    if pre_deploy_check is not None:
+        pre_deploy_check()
 
     pod_id, gpu_id, gpu_price = deploy_pod(
         account_key, public_key, job_id, min_vram, max_price, gpu_match,
@@ -758,7 +799,15 @@ def _cli():
                     help="Rank GPUs and print the command that would run -- no deploy, no spend")
     p.add_argument("--json", action="store_true",
                     help="Print the result as one JSON line (for scripting)")
+    p.add_argument("--override-foreign-pod", action="store_true",
+                    help="Deploy even if another ai-avatar-video-* pod is already active "
+                         "on the shared account (e.g. a colleague's, or your own other "
+                         "process). Off by default -- without it, a foreign pod aborts "
+                         "the run before spending anything.")
     args = p.parse_args()
+
+    account_key = pod_up.load_account_key()
+    pre_deploy_check = pod_up.make_foreign_pod_check(account_key, override=args.override_foreign_pod)
 
     try:
         result = generate_avatar_video(
@@ -768,6 +817,7 @@ def _cli():
             end_trim_s=args.end_trim_s,
             max_price=args.max_price, min_vram=args.min_vram,
             gpu_match=args.gpu_match, run_timeout_s=args.timeout, dry_run=args.dry_run,
+            pre_deploy_check=pre_deploy_check,
         )
     except Exception as e:
         print(f"[generate] FAILED: {e}", file=sys.stderr)

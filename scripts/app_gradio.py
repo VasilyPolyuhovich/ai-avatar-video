@@ -71,8 +71,10 @@ class RenderState:
     Same "shared object + Timer polling" pattern as PodSession/status_md
     below, applied to render progress and last-used inputs too. Guarded by
     its own lock, kept separate from PodSession._lock (never nested --
-    status_cb callbacks only ever fire from inside render_on_pod/deploy_pod/
-    wait_for_ssh, all of which run outside PodSession._lock)."""
+    status_cb callbacks fire from inside render_on_pod/deploy_pod/
+    wait_for_ssh, and from PodSession.terminate()/_watchdog_loop, all of
+    which run outside PodSession._lock by design; see PodSession's own
+    _terminate_locked docstring in generate_avatar_video.py)."""
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -98,7 +100,13 @@ class RenderState:
             if self.status == "running":
                 return None
             self.status = "running"
-            self.log_lines = []
+            # Seeded with a placeholder line (not []) so the click's own
+            # immediate response (handle_submit -> refresh_from_state, called
+            # synchronously right after this) has something to show instead
+            # of a blank status panel -- the background thread's first real
+            # log line may take a moment to land, especially on an
+            # already-warm pod with no deploy/SSH wait ahead of it.
+            self.log_lines = ["Starting ..."]
             self.result_path = None
             self.error_text = None
             self.job_token = uuid.uuid4().hex
@@ -139,45 +147,50 @@ class RenderState:
 render_state = RenderState()
 
 
-class ForeignPodDetected(Exception):
-    def __init__(self, pod_id, name):
-        self.pod_id, self.name = pod_id, name
-        super().__init__(f"Another pod is already active on this account: {pod_id} ({name})")
+# Foreign-pod detection itself lives in pod_up.py (pod_up.find_other_pod,
+# pod_up.make_foreign_pod_check, pod_up.ForeignPodDetected) -- shared with
+# generate_avatar_video.py's own standalone CLI, which needs the exact same
+# check (see its _cli()). Only the UI-facing bits (banner display, caching
+# for the polling Timers below) stay here.
+
+_foreign_pod_cache = {"checked_at": 0.0, "result": None}
+_FOREIGN_POD_CACHE_TTL_S = 8  # under the 10s banner Timer's interval, so a
+# poll is never more than one interval stale. Without this, every open
+# browser tab/device independently re-runs the same account-wide RunPod API
+# call every 10s -- N tabs means N identical calls; this collapses them to
+# ~1 real call per TTL window regardless of tab count. Deliberately NOT used
+# by pod_up.make_foreign_pod_check() itself (the pre_deploy_check backstop
+# right before an actual deploy) -- that one needs the freshest possible
+# read for its race-resistance purpose, not a cached one.
 
 
 def _find_foreign_pod():
-    """The first OTHER ai-avatar-video-* pod on the shared account (not
-    this session's own pod_id), or None. Fails OPEN (returns None) on a
-    transient RunPod API error -- this is a safety-net convenience check,
-    not the only protection (PodSession._busy still guards this process's
-    own concurrent renders); a flaky API call shouldn't make the whole app
-    unusable."""
+    """The first OTHER project pod on the shared account (not this
+    session's own pod_id), or None -- for UI display only (the banner and
+    handle_submit's own fast inline check). Cached briefly (see above) and
+    fails OPEN (returns None) on a transient RunPod API error -- this is a
+    safety-net convenience check, not the only protection (PodSession._busy
+    still guards this process's own concurrent renders); a flaky API call
+    shouldn't make the whole app unusable."""
+    now = time.monotonic()
+    if now - _foreign_pod_cache["checked_at"] < _FOREIGN_POD_CACHE_TTL_S:
+        return _foreign_pod_cache["result"]
     try:
-        pods = pod_up.list_pods(session.account_key)
+        result = pod_up.find_other_pod(session.account_key, exclude_pod_id=session.pod_id)
     except Exception as e:
         print(f"[app_gradio] foreign-pod check failed ({e}) -- proceeding without it")
-        return None
-    for p in pods:
-        if p.get("id") == session.pod_id:
-            continue
-        if not (p.get("name") or "").startswith("ai-avatar-video-"):
-            continue
-        return p
-    return None
+        result = None
+    _foreign_pod_cache["checked_at"], _foreign_pod_cache["result"] = now, result
+    return result
 
 
 def make_foreign_pod_check(override):
     """Built fresh per Generate click with that click's override state --
     passed through as PodSession.render()'s pre_deploy_check, called right
     before the actual deploy call (the real, race-resistant gate; the
-    check in handle_submit below is the fast, page-level UX version)."""
-    def check():
-        if override:
-            return
-        foreign = _find_foreign_pod()
-        if foreign is not None:
-            raise ForeignPodDetected(foreign["id"], foreign["name"])
-    return check
+    check in handle_submit below is the fast, page-level UX version). Does
+    its own fresh, uncached lookup -- see pod_up.make_foreign_pod_check."""
+    return pod_up.make_foreign_pod_check(session.account_key, exclude_pod_id=session.pod_id, override=override)
 
 
 def _run_render(token, image, audio, prompt, resolution, no_distill, end_trim_s, override):
@@ -189,9 +202,13 @@ def _run_render(token, image, audio, prompt, resolution, no_distill, end_trim_s,
             pre_deploy_check=make_foreign_pod_check(override),
             status_cb=lambda line: render_state.append_log(token, line))
         elapsed_s = time.monotonic() - t0
+        # snapshot_cost_info() reads gpu_id/gpu_price/cost atomically under
+        # PodSession._lock -- a plain session.gpu_id/session.gpu_price read
+        # here could race a concurrent Stop-pod click (session.terminate())
+        # clearing both to None between the two attribute reads.
+        gpu_id, gpu_price, cost_so_far = session.snapshot_cost_info()
         summary = (f"\n\nThis render: {elapsed_s / 60:.1f} min. "
-                   f"Session so far: ~${session.session_cost_so_far():.2f} "
-                   f"({session.gpu_id} @ ${session.gpu_price}/hr).")
+                   f"Session so far: ~${cost_so_far:.2f} ({gpu_id} @ ${gpu_price}/hr).")
         render_state.finish(token, local_path, summary)
     except Exception as e:
         render_state.fail(token, str(e))
@@ -208,9 +225,21 @@ def refresh_from_state(seen_token):
     s = render_state.snapshot()
     video_update = gr.update()
     new_seen = seen_token
-    if s["status"] == "done" and s["result_path"] and seen_token != s["job_token"]:
-        video_update = s["result_path"]
-        new_seen = s["job_token"]
+    if seen_token != s["job_token"]:
+        if s["status"] == "done" and s["result_path"]:
+            video_update = s["result_path"]
+            new_seen = s["job_token"]
+        else:
+            # A newer job has started since this browser last caught up
+            # (job_token changed) and it isn't done yet -- clear any stale
+            # video from a PREVIOUS job rather than leaving it visibly
+            # displayed through this job's whole run (and through a
+            # possible failure, which would otherwise look like the old
+            # video IS the new job's result). new_seen deliberately stays
+            # unchanged here (not advanced to s["job_token"]) so the "done"
+            # branch above still fires and shows the real result once this
+            # job actually finishes.
+            video_update = None
     status_text = s["log_text"]
     if s["status"] == "error":
         status_text = (status_text + f"\n\nFAILED: {s['error_text']}").strip()
@@ -228,10 +257,12 @@ def refresh_foreign_pod_banner():
     foreign = _find_foreign_pod()
     if foreign is None:
         return gr.update(visible=False), gr.update(visible=False, value=False)
+    status_note = f", статус: `{foreign['desiredStatus']}`" if foreign.get("desiredStatus") else ""
     msg = (f"⚠️ **Виявлено активний под на спільному акаунті:** `{foreign['id']}` "
-           f"(`{foreign['name']}`). Схоже, десь уже триває рендер (можливо, колега, "
-           f"або ваша ж інша вкладка/процес). **Generate заблоковано**, поки ви явно "
-           f"не підтвердите продовження нижче.")
+           f"(`{foreign['name']}`{status_note}). Схоже, десь уже триває рендер (можливо, колега, "
+           f"або ваша ж інша вкладка/процес) -- або це просто зупинений, але не термінований "
+           f"под з минулого разу. **Generate заблоковано**, поки ви явно не підтвердите "
+           f"продовження нижче.")
     return gr.update(value=msg, visible=True), gr.update(visible=True)
 
 
@@ -249,10 +280,16 @@ def handle_submit(image, audio, prompt, resolution, no_distill, end_trim_s, over
     if not override:
         foreign = _find_foreign_pod()
         if foreign is not None:
-            msg = (f"⚠️ Знайдено активний под `{foreign['id']}` (`{foreign['name']}`) на "
+            status_note = f", статус: `{foreign['desiredStatus']}`" if foreign.get("desiredStatus") else ""
+            msg = (f"⚠️ Знайдено активний под `{foreign['id']}` (`{foreign['name']}`{status_note}) на "
                    f"спільному акаунті. Позначте прапорець підтвердження вище і натисніть "
                    f"Generate ще раз, якщо все одно хочете продовжити.")
-            return None, msg, gr.update(), seen_token, gr.update(value=False)
+            # visible=True here too, not just value=False -- this inline
+            # check can be the FIRST thing to detect a foreign pod (between
+            # two 10s refresh_foreign_pod_banner ticks), in which case the
+            # checkbox this message tells the user to tick would otherwise
+            # still be visible=False from the last banner refresh.
+            return None, msg, gr.update(), seen_token, gr.update(value=False, visible=True)
 
     token = render_state.try_start(image, audio, prompt, resolution, no_distill, end_trim_s)
     if token is None:
@@ -456,6 +493,10 @@ def _parse_cli_args():
                     help="Only set this after previewing the untrimmed render once -- see --help in "
                          "run_longcat_avatar.sh or docs/decisions.md for why there's no safe default.")
     p.add_argument("--output", help="Where to save the result (default: outputs/<job-id>.mp4)")
+    p.add_argument("--override-foreign-pod", action="store_true",
+                    help="Deploy even if another ai-avatar-video-* pod is already active "
+                         "on the shared account (e.g. a colleague's). Off by default -- "
+                         "without it, a foreign pod aborts the run before spending anything.")
     return p.parse_args()
 
 
@@ -465,18 +506,25 @@ if __name__ == "__main__":
     if args.image or args.audio:
         if not (args.image and args.audio):
             sys.exit("--image and --audio must both be provided for CLI mode")
+        t0 = time.monotonic()
         try:
+            # No status_cb here: _make_loggers() (generate_avatar_video.py)
+            # already unconditionally print()s every log/remote-log line
+            # itself -- passing status_cb=print on top of that used to
+            # double-print every line of a full render's output.
             local_path, _job_id = session.render(
                 args.image, args.audio, prompt=args.prompt, resolution=args.resolution,
                 no_distill=args.no_distill, end_trim_s=args.end_trim_s,
                 output_path=args.output,
-                pre_deploy_check=make_foreign_pod_check(override=False),
-                status_cb=print)
+                pre_deploy_check=make_foreign_pod_check(override=args.override_foreign_pod))
         except Exception as e:
             print(f"[generate] FAILED: {e}", file=sys.stderr)
             session.terminate()
             sys.exit(1)
-        print(f"[generate] video ready: {local_path}")
+        elapsed_s = time.monotonic() - t0
+        gpu_id, gpu_price, cost_so_far = session.snapshot_cost_info()
+        print(f"[generate] video ready: {local_path} "
+              f"({elapsed_s / 60:.1f} min, ~${cost_so_far:.2f} @ {gpu_id} ${gpu_price}/hr)")
         session.terminate()
         sys.exit(0)
 

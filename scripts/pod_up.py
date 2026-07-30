@@ -69,6 +69,15 @@ import urllib.request
 API = "https://api.runpod.io/graphql"
 UA = "ai-avatar-pod-up/1.0"  # default python-urllib UA gets 403'd by the RunPod WAF
 
+# This project's pod-naming convention -- shared by pod_up.py's own manual
+# deploys (POD_NAME default below) and generate_avatar_video.py's deploy_pod()
+# (which appends "-{job_id}"). A single source of truth: these two naming
+# schemes drifting apart once silently defeated the foreign-pod safety check
+# in app_gradio.py/generate_avatar_video.py (a pod_up.py-deployed pod, named
+# exactly this prefix with no suffix, didn't match a stricter "prefix-dash"
+# filter -- fixed by having find_other_pod() below match on this prefix alone).
+POD_NAME_PREFIX = "ai-avatar-video"
+
 # Stock desirability: prefer plentiful hosts so the deploy actually lands.
 STOCK_RANK = {"High": 0, "Medium": 1, "Low": 2}
 
@@ -217,11 +226,70 @@ def pod_status(account_key, pod_id):
 
 
 def list_pods(account_key):
-    """All pods currently on this account: [{"id": ..., "name": ...}, ...].
-    Used to detect a colleague's already-running pod on the shared account
-    before deploying a second one -- see app_gradio.py's foreign-pod check."""
-    data = gql(account_key, "query{myself{pods{id name}}}")
+    """All pods currently on this account:
+    [{"id": ..., "name": ..., "desiredStatus": ...}, ...]. Used to detect a
+    colleague's already-running pod on the shared account before deploying
+    a second one -- see find_other_pod() below."""
+    data = gql(account_key, "query{myself{pods{id name desiredStatus}}}")
     return ((data.get("data") or {}).get("myself") or {}).get("pods") or []
+
+
+class ForeignPodDetected(Exception):
+    """Raised by make_foreign_pod_check()'s returned check when
+    find_other_pod() finds a match and no override was given. Carries
+    pod_id/name/desired_status as structured data (not just str(e)) for
+    callers that want to build a richer message, e.g. app_gradio.py's UI
+    banner. desired_status is included in str(e) itself (not just the
+    structured fields) since this exception's message is what a CLI user
+    actually sees -- it's the human's own signal for judging a possibly
+    stale/stopped pod that find_other_pod() deliberately doesn't try to
+    filter out itself (see find_other_pod's docstring)."""
+    def __init__(self, pod_id, name, desired_status=None):
+        self.pod_id, self.name, self.desired_status = pod_id, name, desired_status
+        status_note = f", status: {desired_status}" if desired_status else ""
+        super().__init__(f"Another pod is already active on this account: {pod_id} ({name}{status_note})")
+
+
+def find_other_pod(account_key, exclude_pod_id=None, name_prefix=POD_NAME_PREFIX):
+    """First pod on this account whose name starts with name_prefix, other
+    than exclude_pod_id, or None. Deliberately does NOT filter on
+    desiredStatus (a Stopped-but-not-terminated pod still counts as a
+    potential conflict) -- RunPod's GraphQL API has introspection disabled
+    here, so the exact "stopped" enum value can't be confirmed without a
+    live pod to check against; guessing at a filter risks silently
+    defeating the check the same way the old name-prefix mismatch did.
+    Callers that want to give a human enough info to judge a stale/stopped
+    pod for themselves can read the returned dict's "desiredStatus" field."""
+    for p in list_pods(account_key):
+        if p.get("id") == exclude_pod_id:
+            continue
+        if not (p.get("name") or "").startswith(name_prefix):
+            continue
+        return p
+    return None
+
+
+def make_foreign_pod_check(account_key, exclude_pod_id=None, override=False,
+                            name_prefix=POD_NAME_PREFIX):
+    """A zero-arg callable for PodSession.ensure_ready()'s/
+    generate_avatar_video()'s pre_deploy_check hook: raises
+    ForeignPodDetected if find_other_pod() finds a match and override is
+    False, otherwise a no-op. Fails OPEN on a transient API error (prints a
+    warning, proceeds as if nothing was found) -- this is a best-effort
+    safety-net convenience check, not the only protection (PodSession._busy
+    still guards same-process concurrent renders), so a flaky API call
+    shouldn't block every render."""
+    def check():
+        if override:
+            return
+        try:
+            foreign = find_other_pod(account_key, exclude_pod_id=exclude_pod_id, name_prefix=name_prefix)
+        except Exception as e:
+            print(f"[pod_up] foreign-pod check failed ({e}) -- proceeding without it")
+            return
+        if foreign is not None:
+            raise ForeignPodDetected(foreign["id"], foreign["name"], foreign.get("desiredStatus"))
+    return check
 
 
 def terminate(account_key, pod_id):
@@ -365,7 +433,7 @@ def main():
     image = env("IMAGE", "ghcr.io/vasilypolyuhovich/ai-avatar-infinitetalk:latest")
     cfg = {
         "image": image,
-        "pod_name": env("POD_NAME", "ai-avatar-video"),
+        "pod_name": env("POD_NAME", POD_NAME_PREFIX),
         "container_disk": int(env("CONTAINER_DISK_GB") or "60"),
         "ports": env("PORTS", "8188/http,22/tcp"),
         "registry_auth_id": env("REGISTRY_AUTH_ID", DEFAULT_REGISTRY_AUTH_ID),
