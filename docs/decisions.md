@@ -340,6 +340,54 @@ Unchanged, explicitly not solved by this fix: total local-process death
 nothing to terminate it — `check_balance.sh`/RunPod console remain the
 backstop, same as before.
 
+### Reconnect-resilient UI, foreign-pod protection, headless CLI mode (2026-07-30)
+
+Colleagues now run `app_gradio.py` themselves, each on their own machine,
+sharing one RunPod account — that surfaced two gaps closed before wider
+handoff, plus a CLI alternative:
+
+- **A browser disconnect no longer loses the render.** Progress/results used
+  to live only in one HTTP request's generator stream (`handle_submit`) —
+  closing/refreshing the tab, or a phone's Tailscale connection dropping
+  mid-render, left the page blank/broken even though the render (a
+  background thread driving the pod) kept going and finished normally.
+  Replaced with a shared, in-process `RenderState` object — deliberately
+  not `gr.State`, which is per-browser-session in this Gradio version, the
+  wrong shape for state that must survive a reload and be visible to every
+  connection — polled by a `gr.Timer(2)` and `demo.load()`, so any
+  connected or reconnected page converges on the same server-side truth. A
+  `job_token` gate (`RenderState.try_start`) prevents a double-click/
+  two-tabs race from clobbering an in-progress job's displayed state.
+- **Foreign-pod hard block.** Colleagues sharing one account had nothing
+  stopping a second person deploying a second pod while someone else's
+  render was already running — a real double-billing risk. Added
+  `pod_up.list_pods()` (GraphQL) plus a `pre_deploy_check` hook on
+  `PodSession.ensure_ready()`, called immediately before the actual deploy
+  call (not just at page load, to close most of the TOCTOU race window): if
+  another `ai-avatar-video-*` pod is found, Generate is blocked with a
+  warning until an explicit, single-use override checkbox is ticked — every
+  other safety mechanism in this codebase is a hard guarantee, not a
+  dismissible warning, so this follows the same pattern. First cut of the
+  checkbox had a real bug (caught in a post-implementation self-review, not
+  live): nothing reset it after a click consumed it, so once ticked it
+  silently kept overriding the block on every later click for as long as a
+  foreign pod stayed detected — fixed by resetting it to unticked in every
+  `handle_submit` return path. Dropped from the original design: showing
+  the foreign pod's own render log over SSH — `docker/longcat-avatar/
+  entrypoint.sh` authorizes only the deploying person's own SSH key, so a
+  colleague's key is never valid on someone else's pod.
+- **Headless CLI mode for `app_gradio.py`** (`--image`/`--audio`/...): reuses
+  the same `PodSession`/warm-pod machinery as the web UI, for colleagues who
+  prefer the terminal without needing `generate_avatar_video.py` directly.
+
+Full usage: [`generate-video.md`](generate-video.md). Verified via dry-run
+only, no real pod deployed: Blocks-tree construction, `RenderState`
+round-trip and race guard, the video re-emit guard, the foreign-pod block/
+override/reset flow (one live, free RunPod API call), and CLI argument
+validation. **A real end-to-end exercise of this UI rework against an
+actual pod is still outstanding** — same gap already noted below for the
+earlier `PodSession` work.
+
 ## Still open
 - Whether SageAttention gets built on top of the LongCat image (deferred to
   the actual pod — see `infra-notes.md`).

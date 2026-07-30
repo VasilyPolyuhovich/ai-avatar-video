@@ -216,6 +216,14 @@ def pod_status(account_key, pod_id):
     return p.get("desiredStatus"), p.get("machineId"), (rt.get("uptimeInSeconds") or 0)
 
 
+def list_pods(account_key):
+    """All pods currently on this account: [{"id": ..., "name": ...}, ...].
+    Used to detect a colleague's already-running pod on the shared account
+    before deploying a second one -- see app_gradio.py's foreign-pod check."""
+    data = gql(account_key, "query{myself{pods{id name}}}")
+    return ((data.get("data") or {}).get("myself") or {}).get("pods") or []
+
+
 def terminate(account_key, pod_id):
     gql(account_key, "mutation{podTerminate(input:{podId:%s})}" % json.dumps(pod_id))
 
