@@ -524,7 +524,7 @@ class PodSession:
         self._watchdog_thread = None
         self._watchdog_stop = threading.Event()
 
-    def ensure_ready(self, status_cb=None):
+    def ensure_ready(self, status_cb=None, pre_deploy_check=None):
         log, _ = _make_loggers(status_cb)
         with self._lock:
             if self.pod_id is not None:
@@ -536,6 +536,20 @@ class PodSession:
         # Stop/atexit/signal-handler termination attempts hang for the same
         # duration. self._busy (set by render() before calling this) is
         # what prevents a second concurrent deploy attempt, not this lock.
+
+        # pre_deploy_check: an optional caller-supplied hook, called here
+        # (outside the lock, immediately before the real deploy call) so it
+        # can raise to abort -- e.g. app_gradio.py's foreign-pod check,
+        # keeping "is another colleague's pod already up on the shared
+        # account" policy out of PodSession itself (pod-lifecycle-only).
+        # This is the real, race-resistant check; a page-load-time check
+        # alone would leave a much longer window open. A residual gap still
+        # exists between this call and the deploy call actually landing --
+        # accepted, not solved, same as this project's other documented
+        # SIGKILL/crash gaps (see docs/decisions.md).
+        if pre_deploy_check is not None:
+            pre_deploy_check()
+
         if self._session_id is None:
             self._session_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + uuid.uuid4().hex[:6]
         pod_id, gpu_id, gpu_price = deploy_pod(
@@ -564,7 +578,8 @@ class PodSession:
 
     def render(self, image_path, audio_path, *, prompt=None, resolution="480p",
                num_segments=None, output_path=None, run_timeout_s=None,
-               no_distill=False, audio_gain_db=None, end_trim_s=None, status_cb=None):
+               no_distill=False, audio_gain_db=None, end_trim_s=None,
+               pre_deploy_check=None, status_cb=None):
         log, remote_log = _make_loggers(status_cb)
         with self._lock:
             if self._busy:
@@ -574,7 +589,10 @@ class PodSession:
             # ensure_ready()'s RETURN VALUE is used below, never self.ip/self.port
             # re-read afterward -- avoids a TOCTOU window where a concurrent
             # terminate() could null those fields between the two calls.
-            ip, port, key_path = self.ensure_ready(status_cb)
+            # If pre_deploy_check raises (no pod deployed yet on this call),
+            # that propagates straight past the inner try/except below --
+            # deliberately: there's no pod of ours to terminate in that case.
+            ip, port, key_path = self.ensure_ready(status_cb, pre_deploy_check=pre_deploy_check)
             try:
                 local_path, job_id = render_on_pod(
                     ip, port, key_path, image_path, audio_path,

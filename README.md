@@ -1,23 +1,49 @@
 # AI Avatar Video
 
 Self-hosted talking-head video generation (photo + audio → lip-synced video,
-sized for a Telegram video note), on RunPod GPUs. Full goal/spec/constraints:
-[`ai-video-message-brief.md`](ai-video-message-brief.md). Locked decisions and
-their reasoning: [`docs/decisions.md`](docs/decisions.md).
+sized for a Telegram video note), on RunPod GPUs.
 
-## Status: A/B decided, generation pipeline automated
-
+**Status: A/B decided, generation pipeline automated and colleague-ready.**
 The A/B test is **decided**: **LongCat-Video-Avatar-1.5** beat InfiniteTalk
 (better lip-sync, correct identity preservation, faster renders) — see
 [`docs/decisions.md`](docs/decisions.md#2-generation-stack--ab-decided-2026-07-25-longcat-video-avatar-15-wins).
 The full deploy → render → retrieve → terminate pipeline is proven working
-end-to-end and is now a one-command tool.
+end-to-end and is a one-command tool, with a CLI, a reconnect-safe local web
+UI, and a headless CLI mode for the UI script too.
 
-**Want to generate a video?** Start at
-[`docs/generate-video.md`](docs/generate-video.md) — it covers setup and
-day-to-day usage for both the CLI and a local point-and-click UI.
+## Getting started
 
-What exists:
+New here? Do these in order — full detail for all three lives in
+**[`docs/generate-video.md`](docs/generate-video.md), start there**:
+
+1. **Get repo + credential access.** Ask the repo owner
+   ([VasilyPolyuhovich](https://github.com/VasilyPolyuhovich)) for a
+   collaborator invite and a copy of the shared `~/.runpod-key-video`
+   account key (sent out-of-band, never over plain chat/email).
+2. **Install prerequisites and generate your own SSH keypair.** Python
+   3.10+, `git`, an SSH client, then `python3 -m venv .venv && pip install
+   -r requirements.txt`. The keypair is per-person and local-only — never
+   shared, never committed.
+3. **Generate a video** — any of the three ways below.
+
+Already set up? Jump straight in:
+
+```bash
+# CLI: deploys a pod, renders, downloads the result, terminates the pod
+python3 scripts/generate_avatar_video.py --image photo.jpg --audio voice.mp3
+
+# Local web UI: reload/reopen the page any time, it reconnects automatically
+python3 scripts/app_gradio.py
+
+# Or app_gradio.py's own headless CLI mode -- no browser, same warm-pod code path
+python3 scripts/app_gradio.py --image photo.jpg --audio voice.mp3
+```
+
+Requires `~/.runpod-key-video` (account key) and
+`~/.runpod/ssh/runpodctl-video-ssh-key[.pub]` locally — see
+[`docs/generate-video.md`](docs/generate-video.md) for how to get both.
+
+## What exists
 
 - A **250GB network volume** on RunPod (`fl7pl7z0sz`, US-MD-1), holding both
   stacks' model weights (verified intact). Two RunPod accounts exist for
@@ -43,10 +69,6 @@ What exists:
   verified boot, auto-retry) both the orchestrator and manual ops use
   directly.
 
-See [`docs/ab-test-plan.md`](docs/ab-test-plan.md) for the full comparison
-that decided the winner, and [`docs/infra-notes.md`](docs/infra-notes.md)
-for the persistence/cost/SSH details specific to this setup.
-
 ## Layout
 
 ```
@@ -64,19 +86,13 @@ docs/                           Decisions, A/B test plan, infra notes, generate-
 .github/workflows/               CI: build + push both images to GHCR
 ```
 
-## Quick start
+## Documentation map
 
-```bash
-# Generate a video (see docs/generate-video.md for full setup first)
-python3 scripts/generate_avatar_video.py --image photo.jpg --audio voice.mp3
-
-# Or the local web UI
-python3 scripts/app_gradio.py
-```
-
-Requires `~/.runpod-key-video` (account key) and
-`~/.runpod/ssh/runpodctl-video-ssh-key[.pub]` locally — see
-[`docs/generate-video.md`](docs/generate-video.md) for the full one-time
-setup (including for colleagues) and
-[`docs/infra-notes.md`](docs/infra-notes.md#two-runpod-accounts) for the
-account details.
+| File | Read this for |
+|---|---|
+| [`docs/generate-video.md`](docs/generate-video.md) | **Start here.** One-time setup + day-to-day usage: CLI, web UI, headless UI-script CLI mode, cost, troubleshooting. |
+| [`docs/decisions.md`](docs/decisions.md) | Locked decisions and *why* — generation stack, network volume, UI design — a dated changelog. |
+| [`docs/ab-test-plan.md`](docs/ab-test-plan.md) | The A/B methodology and results that picked LongCat over InfiniteTalk. |
+| [`docs/infra-notes.md`](docs/infra-notes.md) | Deeper RunPod reference: SSH recipes, GPU/CUDA choices, persistence, cost control, registry auth. |
+| [`docs/prompt-guide.md`](docs/prompt-guide.md) | How to write a prompt that actually changes tone/expression on this checkpoint. |
+| [`ai-video-message-brief.md`](ai-video-message-brief.md) | Original pre-implementation project brief (goal/spec). Historical — some decisions in it are since superseded, see `decisions.md`. |

@@ -1,7 +1,10 @@
-# Infra notes (project-specific distillation of the `runpod-pod-ops` skill)
+# Infra notes
 
-Full detail lives in the skill (`~/.claude/skills/runpod-pod-ops/`); this file
-only records the choices specific to this project.
+Deeper reference material on this project's RunPod setup — SSH recipes,
+GPU/CUDA choices, persistence layout, cost control, registry auth. If
+you're setting up a new machine or just want to generate a video, start at
+[`generate-video.md`](generate-video.md) instead; come back here when you
+need the "why" behind something or want to do a manual/SSH-level operation.
 
 ## Two RunPod accounts
 
@@ -112,8 +115,8 @@ at 0, identical to an actually-broken host. **If a deploy ever silently
 fails to start again, check the RunPod console/email for the real reason
 before assuming host flakiness.**
 
-Fixed via the skill's `saveRegistryAuth` mutation (lowercase owner name is
-mandatory, or the mutation silently leaves a broken record) — credential id
+Fixed via RunPod's `saveRegistryAuth` GraphQL mutation (lowercase owner name
+is mandatory, or the mutation silently leaves a broken record) — credential id
 `cmrzcm01x0079uy8y4v8536wo`, already the default `REGISTRY_AUTH_ID` in
 `pod_up.py`. No action needed for normal use. To make the packages public
 instead (removing the need for this credential entirely), it has to be done

@@ -145,6 +145,55 @@ which ones are actually recommended. By default this only runs on your own
 machine — nobody else can reach it (see "Remote access" below to change
 that deliberately).
 
+**Closing the tab or refreshing mid-render is safe.** The render itself
+runs independently of any browser connection (a background thread on your
+machine, driving a pod in the cloud) — reopening `http://127.0.0.1:7860`
+picks the page back up automatically: current progress log, the finished
+video once it's ready, and your last-used photo/audio/prompt/settings, with
+no need to re-upload or re-click anything. This covers a closed tab, a
+page reload, or a dropped connection (e.g. a phone on Tailscale losing
+signal); it does **not** cover `app_gradio.py` itself being restarted —
+that's still a fresh, empty session (in-memory state only, same accepted
+gap as the pod-crash cases below).
+
+**Foreign-pod protection.** Before deploying a pod, the UI checks whether
+another `ai-avatar-video-*` pod is already active on the shared account —
+a colleague's session, or your own other tab/process. If it finds one,
+**Generate is blocked** and a warning banner shows the other pod's id and
+name. A confirmation checkbox appears only in that situation; tick it and
+click Generate again if you're sure it's safe to continue anyway (e.g. you
+know that pod is stale). This is a *different* mechanism from the
+"one render at a time" rule described below — that one is about a single
+running `app_gradio.py` process; this one is about **separate people's
+processes** stepping on each other on the same account.
+
+#### Headless CLI mode (no browser)
+
+Prefer the terminal, or running on a machine without a browser? The same
+script also runs one-shot and non-interactively when given `--image` and
+`--audio`:
+
+```bash
+python3 scripts/app_gradio.py \
+  --image path/to/photo.jpg \
+  --audio path/to/voice.mp3 \
+  --prompt "A person speaks calmly to the camera in a steady, natural tone." \
+  --resolution 480p
+```
+
+This never binds a port or opens a browser — it deploys a pod, renders,
+downloads the result (default `outputs/<job-id>.mp4`, override with
+`--output path/to/result.mp4`), and terminates the pod, printing progress
+to your terminal just like Option 1. Other flags: `--no-distill` and
+`--end-trim-s` (same caveats as Option 1 — not recommended /
+preview-untrimmed-first, respectively). There's no override for the
+foreign-pod check here: if another pod is already active on the shared
+account, this exits with an error rather than deploying a second one —
+resolve that first (check with whoever's pod it is, or the
+[RunPod console](https://www.runpod.io/console/pods)) rather than retrying
+blindly. `--dry-run` and `--json` are `generate_avatar_video.py`-only
+(Option 1); use that script directly if you want those.
+
 #### Remote access over Tailscale (optional)
 
 If colleagues need to reach your running UI without doing their own local
@@ -185,14 +234,15 @@ Two things this does **not** change, either way:
   specific laptop being on), the same `tailscale serve` setup running on a
   small always-on machine on the same tailnet would do it — not set up
   today.
-- **One shared session, not per-colleague.** The pod-management session
-  (`PodSession`) has no per-user concept — if someone clicks Generate
-  while another render is already in progress, they get a clear
-  "a render is already in progress on this session" error, not a queued
-  job or a second pod. Fine for colleagues taking turns; genuinely
-  simultaneous multi-user rendering isn't supported today (would need a
-  render queue or a session per user, each spinning up its own pod at
-  proportionally higher GPU cost).
+- **One `app_gradio.py` process handles one render at a time.** Clicking
+  Generate again (or from a second tab) while a render is already running
+  in the *same* process just shows the current progress — it does not
+  queue a second job or start a second pod. Fine for one person taking
+  turns across tabs; genuinely simultaneous rendering within one process
+  isn't supported today. Across **separate** `app_gradio.py` processes
+  (e.g. two colleagues on their own laptops) it's the foreign-pod
+  protection described in "Option 2" above that prevents a second pod,
+  not this — the two mechanisms cover different cases.
 
 **Unlike the CLI, the UI keeps one pod alive across a session** instead of
 redeploying for every click — the first Generate pays the usual ~10-16 min
@@ -287,6 +337,22 @@ If you're about to generate a large batch, check balance first.
   tolerated up to **30 minutes** of lost contact before giving up. If you
   see `lost contact with pod for over 1800s`, that's this backstop finally
   giving up after real, prolonged connectivity loss, not a first-hiccup
-  overreaction.
+  overreaction. (This is the pod/SSH layer being resilient; the *browser*
+  layer has its own separate reconnect handling — see the next item.)
+- **Closed or refreshed the Gradio tab mid-render and now unsure if it's
+  still going** — just reopen `http://127.0.0.1:7860`; the page reconnects
+  to the actual render state automatically (log, progress, and the video
+  once ready — see "Option 2" above). As long as `app_gradio.py` itself is
+  still running in its terminal, the render was never affected by the
+  browser disconnect.
+- **Generate is blocked with "Another pod is already active on this
+  account"** — this is the foreign-pod protection (see "Option 2" above)
+  refusing to deploy a second pod on the shared account. Check the pod id/
+  name shown against who you know is using it; if it's genuinely stale
+  (e.g. a crashed session that never cleaned up), either terminate it via
+  the [RunPod console](https://www.runpod.io/console/pods) first, or tick
+  the confirmation checkbox in the UI and click Generate again. CLI mode
+  (`app_gradio.py --image ... --audio ...`) has no override — resolve the
+  conflict first, then retry.
 - **General infra questions** (SSH details, GPU/region behavior, registry
   auth) — see [`infra-notes.md`](infra-notes.md).
