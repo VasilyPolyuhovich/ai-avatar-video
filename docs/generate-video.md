@@ -129,6 +129,10 @@ Useful flags:
   audio's loudness unconditionally before encoding, so the value never
   reaches the model. See `docs/decisions.md#2-generation-stack` for both
   findings.
+- `--override-foreign-pod` — by default, this exits with an error rather
+  than deploying if another `ai-avatar-video-*` pod is already active on
+  the shared account (a colleague's, most likely). Pass this flag to
+  deploy anyway once you've confirmed it's safe to.
 
 ### Option 2: local web UI (Gradio)
 
@@ -184,20 +188,28 @@ python3 scripts/app_gradio.py \
 This never binds a port or opens a browser — it deploys a pod, renders,
 downloads the result (default `outputs/<job-id>.mp4`, override with
 `--output path/to/result.mp4`), and terminates the pod, printing progress
-to your terminal just like Option 1. Other flags: `--no-distill` and
-`--end-trim-s` (same caveats as Option 1 — not recommended /
-preview-untrimmed-first, respectively). There's no override for the
-foreign-pod check here: if another pod is already active on the shared
-account, this exits with an error rather than deploying a second one —
-resolve that first (check with whoever's pod it is, or the
-[RunPod console](https://www.runpod.io/console/pods)) rather than retrying
-blindly. `--dry-run` and `--json` are `generate_avatar_video.py`-only
-(Option 1); use that script directly if you want those.
+to your terminal just like Option 1 (including a cost/duration summary on
+success). Other flags: `--no-distill` and `--end-trim-s` (same caveats as
+Option 1 — not recommended / preview-untrimmed-first, respectively), and
+`--override-foreign-pod` (same meaning as Option 1's flag above — by
+default this exits with an error rather than deploying if another pod is
+already active on the shared account). `--dry-run` and `--json` are
+`generate_avatar_video.py`-only (Option 1); use that script directly if you
+want those.
 
 #### Remote access over Tailscale (optional)
 
 If colleagues need to reach your running UI without doing their own local
 setup, and you already have [Tailscale](https://tailscale.com) set up:
+
+**Know before you share this:** everything shown on the page — the current
+render's progress log, the last-used photo/audio/prompt, and the most
+recently finished video — is shared across **every** connection to your
+`app_gradio.py` process, not private per visitor (this is what makes reload/
+reconnect work, see "Option 2" above). Anyone who opens your tailnet URL
+sees your last upload and result, not a blank page of their own. Fine for a
+quick handoff between trusted colleagues; don't rely on it for anything you
+wouldn't want a tailnet-mate to see.
 
 ```bash
 tailscale serve --bg http://localhost:7860
@@ -348,11 +360,17 @@ If you're about to generate a large batch, check balance first.
 - **Generate is blocked with "Another pod is already active on this
   account"** — this is the foreign-pod protection (see "Option 2" above)
   refusing to deploy a second pod on the shared account. Check the pod id/
-  name shown against who you know is using it; if it's genuinely stale
-  (e.g. a crashed session that never cleaned up), either terminate it via
+  name/status shown against who you know is using it (a `Stopped`-looking
+  status alongside a name you don't recognize is a good sign it's stale,
+  not actively rendering — this check deliberately doesn't try to filter
+  those out automatically, since RunPod's exact status values aren't
+  confirmed against a live pod here; you're the more reliable judge). If
+  it's genuinely stale (e.g. a crashed session that never cleaned up),
+  either terminate it via
   the [RunPod console](https://www.runpod.io/console/pods) first, or tick
-  the confirmation checkbox in the UI and click Generate again. CLI mode
-  (`app_gradio.py --image ... --audio ...`) has no override — resolve the
-  conflict first, then retry.
+  the confirmation checkbox in the UI and click Generate again. Either CLI
+  (`generate_avatar_video.py` or `app_gradio.py --image ... --audio ...`)
+  takes the same `--override-foreign-pod` flag if you're sure it's safe to
+  proceed anyway.
 - **General infra questions** (SSH details, GPU/region behavior, registry
   auth) — see [`infra-notes.md`](infra-notes.md).
