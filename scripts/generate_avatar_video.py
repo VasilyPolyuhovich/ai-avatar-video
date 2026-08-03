@@ -279,7 +279,7 @@ def run_remote_detached(ip, port, key_path, remote_cmd, remote_job_dir, run_time
 
 
 def deploy_pod(account_key, public_key, job_id, min_vram, max_price, gpu_match,
-               network_volume_id, image_ref, start_timeout, log):
+               network_volume_id, image_ref, start_timeout, log, on_pod_created=None):
     log(f"ranking GPUs (>= {min_vram:g}GB, <= ${max_price:g}/hr, matching /{gpu_match}/) ...")
     ranked = pod_up.rank_gpus(account_key, min_vram, max_price, gpu_match)
     if not ranked:
@@ -307,7 +307,7 @@ def deploy_pod(account_key, public_key, job_id, min_vram, max_price, gpu_match,
     }
     log(f"deploying pod {cfg['pod_name']} ...")
     pod_id, machine, gpu_id, gpu_price = pod_up.deploy_with_fallback(
-        account_key, ranked, cfg, public_key, start_timeout)
+        account_key, ranked, cfg, public_key, start_timeout, on_pod_created=on_pod_created)
     log(f"pod {pod_id} running on {gpu_id} @ ${gpu_price}/hr (host {machine})")
     return pod_id, gpu_id, gpu_price
 
@@ -552,21 +552,36 @@ class PodSession:
 
         if self._session_id is None:
             self._session_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + uuid.uuid4().hex[:6]
+
+        def _mark_pod_created(pod_id):
+            # Fired by deploy_pod() the instant a candidate's deploy
+            # mutation succeeds -- well before deploy_pod() itself returns
+            # (which additionally waits for wait_container_start's
+            # uptime>0 confirmation, up to start_timeout, 10 min by
+            # default, possibly repeated across several GPU candidates if
+            # a host fails to boot). A foreign-pod check (app_gradio.py's
+            # _find_foreign_pod / pre_deploy_check) reads session.pod_id to
+            # exclude "this session's own pod" -- leaving it None for that
+            # WHOLE deploy-and-verify window (not just the later SSH wait)
+            # used to make this session's own just-created, still-booting
+            # pod look "foreign" to itself on every periodic poll during
+            # that window (confirmed live 2026-08-02: a colleague saw the
+            # "another pod is active" banner about their own fresh pod).
+            # Safe to set early, and safe to call again for a later
+            # candidate if this one gets blocklisted/terminated below:
+            # ensure_ready() has exactly one caller (render(), itself
+            # serialized by self._busy), so no concurrent second call can
+            # observe pod_id set while ip/port are still None, and a stale
+            # pod_id left pointing at an already-terminated candidate just
+            # won't match a future list_pods() result.
+            with self._lock:
+                self.pod_id = pod_id
+
         pod_id, gpu_id, gpu_price = deploy_pod(
             self.account_key, self.public_key, self._session_id,
             self.min_vram, self.max_price, self.gpu_match,
-            self.network_volume_id, self.image_ref, self.start_timeout, log)
-        # self.pod_id/gpu_id/gpu_price are set HERE, as soon as the pod
-        # exists -- not after wait_for_ssh() below (which can take several
-        # more minutes). A foreign-pod check (app_gradio.py's
-        # _find_foreign_pod / pre_deploy_check) reads session.pod_id to
-        # exclude "this session's own pod" -- leaving it None during the
-        # whole SSH-boot window used to make this session's own
-        # just-deployed pod look "foreign" to itself (and to periodic
-        # polls) for that entire window. Safe to set early: ensure_ready()
-        # has exactly one caller (render(), itself serialized by
-        # self._busy), so no concurrent second call can observe pod_id set
-        # while ip/port are still None.
+            self.network_volume_id, self.image_ref, self.start_timeout, log,
+            on_pod_created=_mark_pod_created)
         with self._lock:
             self.pod_id, self.gpu_id, self.gpu_price = pod_id, gpu_id, gpu_price
             self._session_started_at = time.monotonic()  # billing starts at pod creation, not SSH-ready
