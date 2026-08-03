@@ -371,11 +371,20 @@ def poll_ready(pod_id, port, minutes=20):
     return False
 
 
-def deploy_with_fallback(account_key, ranked, cfg, public_key, start_timeout, max_tries=2):
+def deploy_with_fallback(account_key, ranked, cfg, public_key, start_timeout, max_tries=2,
+                          on_pod_created=None):
     """Try each ranked GPU candidate; blocklist hosts that accept the deploy
     but never boot (uptime stays 0), retry the next candidate. Returns
     (pod_id, machine, gpu_id, gpu_price) for the first pod that actually
-    starts. Raises RuntimeError if every candidate fails."""
+    starts. Raises RuntimeError if every candidate fails.
+
+    on_pod_created: optional callback(pod_id), fired the instant a
+    candidate's deploy mutation succeeds -- BEFORE wait_container_start
+    below, which can block for up to start_timeout (10 min by default),
+    possibly repeated across several candidates. Callers that need to know
+    "this pod is mine" as soon as it exists on the account (e.g.
+    PodSession's foreign-pod exclusion) can't wait for this whole function
+    to return -- see generate_avatar_video.py's ensure_ready()."""
     blocklist = set()
     for g in ranked:
         for attempt in range(1, max_tries + 1):
@@ -389,6 +398,13 @@ def deploy_with_fallback(account_key, ranked, cfg, public_key, start_timeout, ma
                 break  # this GPU is out of stock -> next candidate
             pid = pod["id"]
             machine = pod.get("machineId")
+            if on_pod_created is not None:
+                on_pod_created(pid)  # exists on the account NOW, even
+                # though container-start verification (below) hasn't
+                # happened yet -- harmless to call again for a later
+                # candidate if this one gets blocklisted/terminated below;
+                # a stale reference to an already-terminated pod just won't
+                # match a future list_pods() result.
             if machine and machine in blocklist:
                 print(f"[pod_up]   landed on known-bad host {machine} again -> terminating, retry")
                 terminate(account_key, pid)
